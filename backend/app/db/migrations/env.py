@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from logging.config import fileConfig
+import sys
+from pathlib import Path
+import os
 
 from sqlalchemy import pool
-from sqlalchemy import engine_from_config
+from sqlalchemy import engine_from_config, text
 from alembic import context
+
+# Make sure '/app' is on sys.path when alembic runs from various CWDs
+sys.path.append(str(Path(__file__).resolve().parents[3]))
 
 from app.core.config import get_settings
 from app.db.base import Base
@@ -20,7 +26,8 @@ target_metadata = Base.metadata
 
 
 def get_url() -> str:
-    return get_settings().database_url.replace("+asyncpg", "")
+    url = os.getenv("MIGRATIONS_DSN") or get_settings().database_url
+    return url.replace("+asyncpg", "")
 
 
 def run_migrations_offline() -> None:
@@ -30,6 +37,9 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        version_table="alembic_version",
+        version_table_schema="app",
+        include_schemas=True,
     )
 
     with context.begin_transaction():
@@ -44,7 +54,15 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        # Ensure we create objects in the 'app' schema first
+        connection.execute(text("SET search_path TO app, public"))
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            version_table="alembic_version",
+            version_table_schema="app",
+            include_schemas=True,
+        )
 
         with context.begin_transaction():
             context.run_migrations()

@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+ENV PYTHONPATH=/app
+
 # Use pip instead of poetry for simplicity in container
 COPY backend/pyproject.toml /app/pyproject.toml
 

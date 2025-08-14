@@ -11,6 +11,10 @@ engine: AsyncEngine = create_async_engine(
     settings.database_url,
     echo=settings.debug,
     pool_pre_ping=True,
+    connect_args={
+        # Ensure unqualified table names resolve to our app schema first
+        "server_settings": {"search_path": "app, public"}
+    },
 )
 
 AsyncSessionLocal = async_sessionmaker(
