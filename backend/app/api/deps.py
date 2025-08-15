@@ -26,7 +26,15 @@ async def get_tenant_scoped_session(
     try:
         yield session
     finally:
+        # Reset any aborted transaction so we can unset the GUC reliably
+        try:
+            await session.rollback()
+        except Exception:
+            pass
         # Ensure we don't leak the tenant GUC on connection reuse
-        await unset_tenant_id(session)
+        try:
+            await unset_tenant_id(session)
+        except Exception:
+            pass
 
 

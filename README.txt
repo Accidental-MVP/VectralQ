@@ -1,0 +1,1 @@
+﻿VectralQ test file
