@@ -22,11 +22,15 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     container_name: vectralq-backend
+    gpus: all
     environment:
       DATABASE_URL: postgresql+asyncpg://vectralq_app:vectralq_app@db:5432/vectralq
       ENVIRONMENT: local
       DEBUG: "true"
       PYTHONPATH: /app
+      EMBEDDING_MODEL_NAME: BAAI/bge-large-en-v1.5
+      EMBEDDING_DEVICE: cuda
+      EMBEDDING_BATCH_SIZE: "128"
     depends_on:
       db:
         condition: service_healthy

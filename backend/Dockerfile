@@ -20,7 +20,9 @@ RUN pip install --upgrade pip setuptools wheel \
     && pip install fastapi==0.111.0 uvicorn[standard]==0.30.0 \
     python-dotenv==1.0.1 sqlalchemy==2.0.29 asyncpg==0.29.0 \
     alembic==1.13.1 psycopg2-binary==2.9.9 \
-    pdfminer.six==20221105 tiktoken==0.7.0 python-multipart==0.0.9
+    pdfminer.six==20221105 tiktoken==0.7.0 python-multipart==0.0.9 \
+    numpy==1.26.4 sentence-transformers==3.0.1 \
+    && pip install torch==2.3.0+cu121 -f https://download.pytorch.org/whl/torch_stable.html
 
 COPY backend/app /app/app
 
