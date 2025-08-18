@@ -38,6 +38,18 @@ class Settings:
     cross_encoder_top_n: int = int(os.getenv("CROSS_ENCODER_TOP_N", "20"))
     debug_search: bool = os.getenv("DEBUG_SEARCH", "false").lower() == "true"
 
+    # Context packing / generation
+    context_max_chunks: int = int(os.getenv("CONTEXT_MAX_CHUNKS", "6"))
+    context_token_limit: int = int(os.getenv("CONTEXT_TOKEN_LIMIT", "6000"))
+
+    # LLM client
+    llm_base_url: str | None = os.getenv("LLM_BASE_URL")
+    llm_model: str | None = os.getenv("LLM_MODEL")
+    llm_timeout_ms: int = int(os.getenv("LLM_TIMEOUT_MS", "8000"))
+    llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "600"))
+    llm_temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+    answer_json_required: bool = os.getenv("ANSWER_JSON_REQUIRED", "true").lower() == "true"
+
     def validate(self) -> None:
         # Clamp and validate search settings
         if self.search_top_k_default <= 0:
