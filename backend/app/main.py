@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes.health import router as health_router
 from app.api.routes.docs import router as docs_router, upload_router as upload_root_router
 from app.api.routes.embeddings import router as embeddings_router
+from app.api.routes.search import router as search_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.middleware.request_context import RequestContextMiddleware
@@ -38,6 +39,7 @@ def create_app() -> FastAPI:
     app.include_router(docs_router, prefix="/api")
     app.include_router(upload_root_router, prefix="/api")
     app.include_router(embeddings_router, prefix="/api")
+    app.include_router(search_router, prefix="/api")
 
     return app
 

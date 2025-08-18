@@ -26,9 +26,33 @@ class Settings:
     embedding_device: str | None = os.getenv("EMBEDDING_DEVICE", "cpu")
     embedding_batch_size: int | None = int(os.getenv("EMBEDDING_BATCH_SIZE", "64"))
 
+    # Search configuration
+    search_top_k_default: int = int(os.getenv("SEARCH_TOP_K_DEFAULT", "24"))
+    search_bm25_limit: int = int(os.getenv("SEARCH_BM25_LIMIT", "100"))
+    search_vector_limit: int = int(os.getenv("SEARCH_VECTOR_LIMIT", "100"))
+    search_fusion_mode: str = os.getenv("SEARCH_FUSION_MODE", "linear")
+    search_linear_lambda: float = float(os.getenv("SEARCH_LINEAR_LAMBDA", "0.6"))
+    search_rrf_k: int = int(os.getenv("SEARCH_RRF_K", "60"))
+    search_enable_cross_encoder: bool = os.getenv("SEARCH_ENABLE_CROSS_ENCODER", "false").lower() == "true"
+    cross_encoder_model: str | None = os.getenv("CROSS_ENCODER_MODEL")
+    debug_search: bool = os.getenv("DEBUG_SEARCH", "false").lower() == "true"
+
+    def validate(self) -> None:
+        # Clamp and validate search settings
+        if self.search_top_k_default <= 0:
+            self.search_top_k_default = 10
+        self.search_fusion_mode = (self.search_fusion_mode or "linear").lower()
+        if self.search_fusion_mode not in {"linear", "rrf"}:
+            self.search_fusion_mode = "linear"
+        # Lambda bounds [0,1]
+        if not (0.0 <= self.search_linear_lambda <= 1.0):
+            self.search_linear_lambda = 0.6
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    return Settings()
+    s = Settings()
+    s.validate()
+    return s
 
 

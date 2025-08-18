@@ -18,6 +18,8 @@ psycopg2-binary = "^2.9.9"
 pdfminer.six = "20221105"
 tiktoken = "0.7.0"
 python-multipart = "0.0.9"
+numpy = "^1.26.4"
+sentence-transformers = "^3.0.1"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.4.6"

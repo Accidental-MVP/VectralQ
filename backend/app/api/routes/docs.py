@@ -178,3 +178,25 @@ async def get_doc_metadata(
     }
 
 
+@router.get("/{doc_file_id}/chunks/{chunk_id}")
+async def get_chunk_text(
+    doc_file_id: str,
+    chunk_id: str,
+    session: AsyncSession = Depends(get_tenant_scoped_session),
+) -> Any:
+    res = await session.execute(
+        text(
+            """
+            SELECT c.text
+            FROM app.doc_chunks c
+            WHERE c.doc_file_id = :doc_file_id AND c.chunk_id_sha1 = :chunk_id
+            """
+        ),
+        {"doc_file_id": doc_file_id, "chunk_id": chunk_id},
+    )
+    row = res.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"doc_file_id": doc_file_id, "chunk_id": chunk_id, "text": row[0]}
+
+
