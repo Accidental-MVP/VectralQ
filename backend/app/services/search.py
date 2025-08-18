@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.logging import request_id_var, tenant_id_var
 from app.services.queries import build_plainto_tsquery, embed_query, vector_literal_from_numpy, html_safe_snippet
+from app.services.xrerank import rerank_with_cross_encoder
 
 
 @dataclass
@@ -219,6 +220,30 @@ def fuse_candidates(
             )
         )
     return results
+
+
+async def maybe_rerank_with_cross_encoder(
+    query: str, results: List[ScoredResult], candidate_map: Dict[str, Candidate]
+) -> List[ScoredResult]:
+    settings = get_settings()
+    if not settings.search_enable_cross_encoder:
+        return results
+    top_n = max(1, min(settings.cross_encoder_top_n, len(results)))
+    top = results[:top_n]
+    pairs: List[Tuple[str, str]] = []
+    for r in top:
+        c = candidate_map.get(r.chunk_id)
+        if c is None:
+            pairs.append((query, ""))
+        else:
+            pairs.append((query, c.text))
+    scores = await rerank_with_cross_encoder(pairs)
+    # Replace score with cross-encoder score (or blend later if desired)
+    for i, s in enumerate(scores):
+        top[i].score = float(s)
+    # Resort combined list by updated scores
+    top_sorted = sorted(top, key=lambda r: r.score, reverse=True)
+    return top_sorted + results[top_n:]
 
 
 def build_snippet(result: Candidate, ts_terms: Optional[str]) -> str:

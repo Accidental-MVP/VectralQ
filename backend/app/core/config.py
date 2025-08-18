@@ -35,6 +35,7 @@ class Settings:
     search_rrf_k: int = int(os.getenv("SEARCH_RRF_K", "60"))
     search_enable_cross_encoder: bool = os.getenv("SEARCH_ENABLE_CROSS_ENCODER", "false").lower() == "true"
     cross_encoder_model: str | None = os.getenv("CROSS_ENCODER_MODEL")
+    cross_encoder_top_n: int = int(os.getenv("CROSS_ENCODER_TOP_N", "20"))
     debug_search: bool = os.getenv("DEBUG_SEARCH", "false").lower() == "true"
 
     def validate(self) -> None:

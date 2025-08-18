@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_tenant_scoped_session, get_tenant_id
 from app.core.config import get_settings
 from app.core.logging import request_id_var
-from app.services.search import run_bm25, run_vector, fuse_candidates, build_snippet
+from app.services.search import run_bm25, run_vector, fuse_candidates, build_snippet, maybe_rerank_with_cross_encoder
 
 
 router = APIRouter(prefix="/search", tags=["search"])
@@ -56,13 +56,14 @@ async def search(
         rrf_k=settings.search_rrf_k,
     )
 
+    # Optional cross-encoder rerank
+    cand_index = {c.chunk_id_sha1: c for c in (bm25_results + vector_results)}
+    reranked_results = await maybe_rerank_with_cross_encoder(q, fused_results, cand_index)
+
     # Build response up to top_k
     out: List[Dict[str, Any]] = []
-    # For highlighting, we pass the original query terms (simple split) as ts_terms hint
     ts_terms = q
-    # Need candidate details for snippets -> build map from chunk_id to candidate
-    cand_index = {c.chunk_id_sha1: c for c in (bm25_results + vector_results)}
-    for r in fused_results[:top_k]:
+    for r in reranked_results[:top_k]:
         cand = cand_index.get(r.chunk_id)
         snippet = build_snippet(cand, ts_terms) if cand is not None else ""
         out.append(
@@ -79,7 +80,7 @@ async def search(
     took_ms = int((time.perf_counter() - t0) * 1000)
     # Minimal structured log
     req_id = request_id_var.get() or "-"
-    reranked = False
+    reranked = get_settings().search_enable_cross_encoder
     print(
         {
             "event": "search",
