@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 
 from app.api.deps import get_tenant_scoped_session, get_tenant_id
 from app.core.config import get_settings
@@ -81,19 +82,30 @@ async def search(
     # Minimal structured log
     req_id = request_id_var.get() or "-"
     reranked = get_settings().search_enable_cross_encoder
-    print(
-        {
-            "event": "search",
-            "request_id": req_id,
-            "tenant_id": tenant_id,
-            "top_k": top_k,
-            "bm25_n": len(bm25_results),
-            "vector_n": len(vector_results),
-            "fusion_mode": settings.search_fusion_mode,
-            "took_ms": took_ms,
-            "reranked": reranked,
-        }
-    )
+    try:
+        await session.execute(
+            text(
+                """
+                INSERT INTO app.search_logs (tenant_id, request_id, query, top_k, bm25_n, vector_n, fusion_mode, took_ms, reranked)
+                VALUES (:tenant_id, :request_id, :query, :top_k, :bm25_n, :vector_n, :fusion_mode, :took_ms, :reranked)
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "request_id": req_id,
+                "query": q,
+                "top_k": top_k,
+                "bm25_n": len(bm25_results),
+                "vector_n": len(vector_results),
+                "fusion_mode": settings.search_fusion_mode,
+                "took_ms": took_ms,
+                "reranked": reranked,
+            },
+        )
+        await session.commit()
+        print({"event": "telemetry_search_ok", "request_id": req_id})
+    except Exception as exc:
+        print({"event": "telemetry_search_err", "error": str(exc)})
 
     return {"results": out}
 

@@ -22,6 +22,7 @@ async def _call_openai_compatible(
     timeout_ms: int,
     max_tokens: int,
     temperature: float,
+    stream: bool = False,
 ) -> str:
     url = base_url.rstrip("/") + "/v1/chat/completions"
     payload: Dict[str, Any] = {
@@ -32,13 +33,40 @@ async def _call_openai_compatible(
         ],
         "max_tokens": max_tokens,
         "temperature": temperature,
+        "stream": stream,
     }
+    # Optional: provider JSON mode, if supported
+    try:
+        if get_settings().answer_json_required:
+            # OpenAI compatibility flag (some providers ignore)
+            payload["response_format"] = {"type": "json_object"}
+    except Exception:
+        pass
     async with httpx.AsyncClient(timeout=timeout_ms / 1000) as client:
-        resp = await client.post(url, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"]
-        return str(content)
+        if not stream:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            return str(content)
+        # Streaming path: return concatenated final text
+        text_chunks: list[str] = []
+        async with client.stream("POST", url, json=payload) as sresp:
+            sresp.raise_for_status()
+            async for line in sresp.aiter_lines():
+                if not line or not line.startswith("data: "):
+                    continue
+                chunk = line[len("data: ") :].strip()
+                if chunk == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(chunk)
+                    delta = obj.get("choices", [{}])[0].get("delta", {}).get("content")
+                    if delta:
+                        text_chunks.append(delta)
+                except Exception:
+                    continue
+        return "".join(text_chunks)
 
 
 def _fallback_generate(user_prompt: str, citations_hint: list[dict[str, str]]) -> str:
@@ -82,6 +110,7 @@ async def generate_answer(
     system_prompt: str,
     user_prompt: str,
     citations_hint: list[dict[str, str]] | None = None,
+    stream: bool = False,
 ) -> str:
     settings = get_settings()
     base_url = settings.llm_base_url
@@ -102,9 +131,68 @@ async def generate_answer(
             timeout_ms=timeout_ms,
             max_tokens=max_tokens,
             temperature=temperature,
+            stream=stream,
         )
         return _validate_or_fallback(text, citations_hint or [])
     except Exception:
         return _fallback_generate(user_prompt, citations_hint or [])
+
+
+async def generate_answer_stream(
+    system_prompt: str,
+    user_prompt: str,
+    citations_hint: list[dict[str, str]] | None = None,
+) -> Any:
+    """
+    Async generator yielding text deltas if provider supports streaming; falls back to single final chunk.
+    """
+    settings = get_settings()
+    base_url = settings.llm_base_url
+    model = settings.llm_model or "gpt-oss-20b"
+    timeout_ms = settings.llm_timeout_ms
+    max_tokens = settings.llm_max_tokens
+    temperature = settings.llm_temperature
+
+    if not base_url:
+        yield _fallback_generate(user_prompt, citations_hint or [])
+        return
+
+    url = base_url.rstrip("/") + "/v1/chat/completions"
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": True,
+    }
+    try:
+        if settings.answer_json_required:
+            payload["response_format"] = {"type": "json_object"}
+    except Exception:
+        pass
+
+    async with httpx.AsyncClient(timeout=timeout_ms / 1000) as client:
+        try:
+            async with client.stream("POST", url, json=payload) as sresp:
+                sresp.raise_for_status()
+                async for line in sresp.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    chunk = line[len("data: ") :].strip()
+                    if chunk == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(chunk)
+                        delta = obj.get("choices", [{}])[0].get("delta", {}).get("content")
+                        if delta:
+                            yield delta
+                    except Exception:
+                        continue
+        except Exception:
+            # Fallback: single final JSON
+            yield _fallback_generate(user_prompt, citations_hint or [])
 
 

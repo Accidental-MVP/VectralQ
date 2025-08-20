@@ -134,19 +134,30 @@ async def query(
     latency_ms = int((time.perf_counter() - t0) * 1000)
     # Log
     req_id = request_id_var.get() or "-"
-    print(
-        {
-            "event": "query",
-            "request_id": req_id,
-            "tenant_id": tenant_id,
-            "top_k": top_k,
-            "selected_chunks": len(used_citations),
-            "model": settings.llm_model or "fallback",
-            "generation_ms": latency_ms,
-            "confidence": confidence,
-            "refused": answer == "I don’t have enough information.",
-        }
-    )
+    try:
+        await session.execute(
+            text(
+                """
+                INSERT INTO app.query_logs (tenant_id, request_id, question, top_k, selected_chunks, model, generation_ms, confidence, refused, streaming)
+                VALUES (:tenant_id, :request_id, :question, :top_k, :selected_chunks, :model, :generation_ms, :confidence, :refused, false)
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "request_id": req_id,
+                "question": q,
+                "top_k": top_k,
+                "selected_chunks": len(used_citations),
+                "model": settings.llm_model or "fallback",
+                "generation_ms": latency_ms,
+                "confidence": confidence,
+                "refused": answer == "I don’t have enough information.",
+            },
+        )
+        await session.commit()
+        print({"event": "telemetry_query_ok", "request_id": req_id})
+    except Exception as exc:
+        print({"event": "telemetry_query_err", "error": str(exc)})
 
     # Stub coverage tokens metric
     coverage = 0.0

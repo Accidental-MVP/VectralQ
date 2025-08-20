@@ -16,6 +16,7 @@ from app.core.config import get_settings
 from app.core.logging import request_id_var
 from app.services.search import run_bm25, run_vector, fuse_candidates
 from app.services.context_packer import pack_context_from_texts
+from app.services.llm_client import SYSTEM_PROMPT, generate_answer, generate_answer_stream
 
 
 router = APIRouter(prefix="/query", tags=["query-stream"])
@@ -89,20 +90,38 @@ async def query_stream(
         packed = pack_context_from_texts(q, triples)
         yield await sse_event({"phase": "packed", "chunks": len(packed.used_citations), "tokens": packed.total_tokens})
 
-        # Fake streaming answer in 3 chunks
-        used = packed.used_citations
-        part1 = "Answer: "
-        part2 = " ".join([c["doc_file_id"] for c in used[:1]]) or ""
-        part3 = "; citations included."
-        for part in (part1, part2, part3):
-            await asyncio.sleep(0.1)
-            yield await sse_event({"delta": part})
+        # Try real provider streaming; if it fails, fallback to fake
+        # Try provider streaming, yield deltas as they arrive
+        stream_text = ""
+        try:
+            async for delta in generate_answer_stream(
+                SYSTEM_PROMPT,
+                f"QUESTION:\n{q}\n\nCONTEXT:\n{packed.packed_context}",
+                citations_hint=packed.used_citations,
+            ):
+                stream_text += delta
+                yield await sse_event({"delta": delta})
+        except Exception:
+            stream_text = ""
+
+        if not stream_text:
+            # Fake streaming fallback
+            used = packed.used_citations
+            part1 = "Answer: "
+            part2 = " ".join([c["doc_file_id"] for c in used[:1]]) or ""
+            part3 = "; citations included."
+            for part in (part1, part2, part3):
+                await asyncio.sleep(0.1)
+                yield await sse_event({"delta": part})
+            final_answer = (part1 + part2 + part3).strip()
+        else:
+            final_answer = stream_text
 
         latency_ms = int((time.perf_counter() - t0) * 1000)
         yield await sse_event({
             "final": {
-                "answer": (part1 + part2 + part3).strip(),
-                "citations": used,
+                "answer": final_answer,
+                "citations": packed.used_citations,
                 "confidence": 0.6,
                 "latency_ms": latency_ms,
             }
