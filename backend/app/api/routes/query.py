@@ -13,7 +13,7 @@ from app.api.deps import get_tenant_scoped_session, get_tenant_id
 from app.core.config import get_settings
 from app.core.logging import request_id_var
 from app.services.search import run_bm25, run_vector, fuse_candidates
-from app.services.context_packer import pack_context
+from app.services.context_packer import pack_context_from_texts
 from app.services.llm_client import SYSTEM_PROMPT, generate_answer
 
 
@@ -94,20 +94,11 @@ async def query(
         if row:
             texts_map[f"{doc_id}#{chunk_id}"] = row[0]
 
-    # Build packed context (include text blocks)
-    # Re-construct ScoredResult-like objects with text for packing
-    # Extend the packer to build blocks with provided texts
-    blocks: List[str] = []
-    used_citations: List[dict] = []
-    total_tokens = 0
-    for r in fused_results:
-        key = f"{r.doc_file_id}#{r.chunk_id}"
-        text_val = texts_map.get(key, "")
-        header = f"[source: {r.doc_file_id}, chunk: {r.chunk_id}]\n"
-        block = header + text_val
-        blocks.append(block)
-        used_citations.append({"doc_file_id": r.doc_file_id, "chunk_id": r.chunk_id})
-    packed_context = "\n\n".join(blocks)
+    # Build packed context via packer with token budgeting
+    triples = [(r.doc_file_id, r.chunk_id, texts_map.get(f"{r.doc_file_id}#{r.chunk_id}", "")) for r in fused_results]
+    packed = pack_context_from_texts(q, triples)
+    used_citations = packed.used_citations
+    packed_context = packed.packed_context
 
     user_prompt = f"QUESTION:\n{q}\n\nCONTEXT:\n{packed_context}"
 
@@ -121,7 +112,9 @@ async def query(
     try:
         obj = json.loads(raw_text)
         answer = str(obj.get("answer") or "I don’t have enough information.")
-        citations = obj.get("citations") or used_citations
+        citations = obj.get("citations")
+        if citations is None:
+            citations = used_citations
         # Enforce citations subset of used_citations
         allowed = {f"{c['doc_file_id']}#{c['chunk_id']}" for c in used_citations}
         clean: List[dict] = []
@@ -155,6 +148,18 @@ async def query(
         }
     )
 
-    return {"answer": answer, "citations": citations, "confidence": confidence, "latency_ms": latency_ms}
+    # Stub coverage tokens metric
+    coverage = 0.0
+    if used_citations:
+        cited = {f"{c['doc_file_id']}#{c['chunk_id']}" for c in citations}
+        coverage = round(len(cited) / max(1, len(used_citations)), 3)
+
+    return {
+        "answer": answer,
+        "citations": citations,
+        "confidence": confidence,
+        "latency_ms": latency_ms,
+        "coverage": coverage,
+    }
 
 

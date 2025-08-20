@@ -10,10 +10,7 @@ from app.core.config import get_settings
 
 
 SYSTEM_PROMPT = (
-    "You are a retrieval-grounded assistant. Answer ONLY using the provided CONTEXT. "
-    "If the answer is missing, reply exactly: I don’t have enough information. "
-    "Always cite sources using the provided doc_file_id and chunk_id. "
-    "Keep answers concise and accurate."
+    "You are a retrieval-grounded assistant. Answer ONLY using the provided CONTEXT. Return ONLY valid JSON with keys: answer (string), citations (array of {doc_file_id, chunk_id}), confidence (number). If missing info, return: {\"answer\":\"I don’t have enough information.\",\"citations\":[],\"confidence\":0.0}. No extra text."
 )
 
 
@@ -58,6 +55,29 @@ def _fallback_generate(user_prompt: str, citations_hint: list[dict[str, str]]) -
     return json.dumps(result)
 
 
+def _validate_or_fallback(raw_text: str, citations_hint: list[dict[str, str]]) -> str:
+    # Ensure valid JSON with required keys; else fallback
+    try:
+        obj = json.loads(raw_text)
+        if not isinstance(obj, dict):
+            raise ValueError("not dict")
+        # Coerce required fields
+        answer = str(obj.get("answer") or "")
+        citations = obj.get("citations")
+        confidence = obj.get("confidence")
+        if answer == "" or not isinstance(citations, list) or confidence is None:
+            raise ValueError("missing keys")
+        return json.dumps({
+            "answer": answer,
+            "citations": citations,
+            "confidence": float(confidence) if isinstance(confidence, (int, float)) else 0.5,
+        })
+    except Exception:
+        # Log minimal marker
+        print({"event": "answer_invalid_json", "raw_len": len(raw_text or "")})
+        return _fallback_generate("", citations_hint)
+
+
 async def generate_answer(
     system_prompt: str,
     user_prompt: str,
@@ -83,7 +103,7 @@ async def generate_answer(
             max_tokens=max_tokens,
             temperature=temperature,
         )
-        return text
+        return _validate_or_fallback(text, citations_hint or [])
     except Exception:
         return _fallback_generate(user_prompt, citations_hint or [])
 

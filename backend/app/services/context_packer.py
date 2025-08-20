@@ -7,6 +7,7 @@ import tiktoken
 
 from app.core.config import get_settings
 from app.services.search import ScoredResult
+from app.core.logging import request_id_var
 
 
 @dataclass
@@ -60,5 +61,39 @@ def pack_context(query: str, ranked_chunks: List[ScoredResult]) -> PackedContext
         total_tokens += tcount
 
     return PackedContext("\n".join(blocks), citations, total_tokens)
+
+
+def pack_context_from_texts(
+    query: str, items: List[tuple[str, str, str]]
+) -> PackedContext:
+    """
+    Pack context from explicit (doc_file_id, chunk_id, text) tuples with token budgeting.
+    """
+    settings = get_settings()
+    max_chunks = max(1, settings.context_max_chunks)
+    token_budget = max(200, settings.context_token_limit)
+
+    seen: set[tuple[str, str]] = set()
+    blocks: List[str] = []
+    citations: List[dict] = []
+    total_tokens = 0
+    for doc_id, chunk_id, text_val in items:
+        key = (doc_id, chunk_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        header = f"[source: {doc_id}, chunk: {chunk_id}]\n"
+        block = header + (text_val or "")
+        tcount = approximate_tokens(block)
+        if (total_tokens + tcount > token_budget and len(blocks) > 0) or len(blocks) >= max_chunks:
+            break
+        blocks.append(block)
+        citations.append({"doc_file_id": doc_id, "chunk_id": chunk_id})
+        total_tokens += tcount
+
+    # lightweight log
+    req_id = request_id_var.get() or "-"
+    print({"event": "context_pack", "request_id": req_id, "selected_chunks": len(blocks), "tokens": total_tokens})
+    return PackedContext("\n\n".join(blocks), citations, total_tokens)
 
 
