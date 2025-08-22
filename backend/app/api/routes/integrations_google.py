@@ -179,11 +179,10 @@ async def oauth_callback(
 
 async def _get_start_page_token(tok: str) -> str:
     async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.get(
+        r = await _with_retry(lambda: client.get(
             f"{DRIVE_BASE}/changes/startPageToken",
             headers={"Authorization": f"Bearer {tok}"},
-        )
-        r.raise_for_status()
+        ))
         return r.json()["startPageToken"]
 
 
@@ -197,12 +196,11 @@ async def _list_changes(tok: str, page_token: str, page_size: int) -> dict[str, 
         "supportsAllDrives": False,
     }
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(
+        r = await _with_retry(lambda: client.get(
             f"{DRIVE_BASE}/changes",
             params=params,
             headers={"Authorization": f"Bearer {tok}"},
-        )
-        r.raise_for_status()
+        ))
         return r.json()
 
 
@@ -220,9 +218,28 @@ async def _download_file(tok: str, file_id: str, mime: str) -> bytes:
             raise HTTPException(status_code=415, detail="Unsupported MIME for export")
         url = f"{DRIVE_BASE}/files/{file_id}/export?mimeType={export}"
     async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.get(url, headers={"Authorization": f"Bearer {tok}"})
-        r.raise_for_status()
+        r = await _with_retry(lambda: client.get(url, headers={"Authorization": f"Bearer {tok}"}))
         return r.content
+
+
+async def _with_retry(call):
+    import asyncio, random
+    for attempt in range(5):
+        try:
+            resp = await call()
+            resp.raise_for_status()
+            return resp
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code
+            # Let 4xx other than 401/429 bubble
+            if code == 401:
+                # caller ensures fresh token
+                raise
+            if code in (429, 500, 502, 503, 504):
+                sleep = min(2 ** attempt + random.random(), 30)
+                await asyncio.sleep(sleep)
+                continue
+            raise
 
 
 def _is_supported_mime(mime: str) -> bool:
@@ -241,6 +258,8 @@ async def sync_now(
     tenant_id: str = Depends(get_tenant_id),
 ) -> Any:
     settings = get_settings()
+    # Ensure RLS GUC is set; commits will clear it (transaction-local), so we will reapply after commits
+    await set_tenant_id(session, tenant_id)
     tok = await _ensure_access_token(session, tenant_id)
 
     # Load connector state
@@ -260,6 +279,7 @@ async def sync_now(
             {"s": _json.dumps(state), "t": tenant_id},
         )
         await session.commit()
+        await set_tenant_id(session, tenant_id)
 
     page_token = state.get("pageToken", state.get("startPageToken"))
     processed = deleted = skipped = 0
@@ -275,7 +295,7 @@ async def sync_now(
                     text(
                         """
                         UPDATE app.doc_files
-                        SET ingest_status='deleted'
+                        SET ingest_status='deleted', deleted_at=NOW()
                         WHERE tenant_id=:t AND source='google_drive' AND external_id=:fid
                         """
                     ),
@@ -315,7 +335,8 @@ async def sync_now(
                 skipped += 1
                 continue
 
-            # Insert or update doc_files
+            # Insert or update doc_files (ensure RLS GUC)
+            await set_tenant_id(session, tenant_id)
             if not row2:
                 res3 = await session.execute(
                     text(
@@ -338,6 +359,7 @@ async def sync_now(
                 doc_file_id = str(res3.scalar_one())
             else:
                 doc_file_id = str(row2[0])
+                await set_tenant_id(session, tenant_id)
                 await session.execute(
                     text(
                         """
@@ -421,6 +443,7 @@ async def sync_now(
                 {"s": _json.dumps(state), "t": tenant_id},
             )
             await session.commit()
+            await set_tenant_id(session, tenant_id)
             break
         else:
             state["pageToken"] = page_token
@@ -430,6 +453,7 @@ async def sync_now(
                 {"s": _json.dumps(state), "t": tenant_id},
             )
             await session.commit()
+            await set_tenant_id(session, tenant_id)
 
     took_ms = int((time.perf_counter() - t0) * 1000)
     return {"processed": processed, "deleted": deleted, "skipped": skipped, "took_ms": took_ms}

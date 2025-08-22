@@ -70,7 +70,7 @@ async def run_bm25(session: AsyncSession, query: str, limit: int, filters: dict[
                ts_rank_cd(c.text_tsv, q.query) AS rank,
                ts_headline('simple', c.text, q.query, 'StartSel=<b>,StopSel=</b>,MaxFragments=2,ShortWord=2') AS headline
         FROM app.doc_chunks c
-        JOIN app.doc_files f ON f.id = c.doc_file_id
+        JOIN app.doc_files f ON f.id = c.doc_file_id AND f.deleted_at IS NULL
         CROSS JOIN q
         WHERE c.text_tsv @@ q.query{filter_sql}
         ORDER BY rank DESC
@@ -109,7 +109,7 @@ async def run_vector(session: AsyncSession, query: str, limit: int, filters: dic
                f.source, c.created_at,
                (1.0 - (c.embedding <=> CAST(:vec AS vector))) AS sim
         FROM app.doc_chunks c
-        JOIN app.doc_files f ON f.id = c.doc_file_id
+        JOIN app.doc_files f ON f.id = c.doc_file_id AND f.deleted_at IS NULL
         WHERE c.embedding IS NOT NULL{filter_sql}
         ORDER BY sim DESC
         LIMIT :limit
