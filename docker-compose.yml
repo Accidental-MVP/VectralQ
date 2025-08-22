@@ -23,6 +23,8 @@ services:
       dockerfile: backend/Dockerfile
     container_name: vectralq-backend
     gpus: all
+    env_file:
+      - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://vectralq_app:vectralq_app@db:5432/vectralq
       ENVIRONMENT: local

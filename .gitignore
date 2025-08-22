@@ -1,0 +1,41 @@
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+.venv/
+venv/
+
+# Node (if dashboard added later)
+node_modules/
+.next/
+dist/
+build/
+
+# Environments & secrets
+.env
+.env.*
+!.env.example
+.env.local
+backend/.env
+
+# Local data & artifacts
+db-data/
+*.log
+*.sqlite
+
+# Docker
+*.pid
+*.pid.lock
+

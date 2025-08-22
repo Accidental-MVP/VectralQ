@@ -8,6 +8,7 @@ from app.api.routes.search import router as search_router
 from app.api.routes.search_debug import router as search_debug_router
 from app.api.routes.query import router as query_router
 from app.api.routes.query_stream import router as query_stream_router
+from app.api.routes.integrations_google import router as google_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.middleware.request_context import RequestContextMiddleware
@@ -46,6 +47,7 @@ def create_app() -> FastAPI:
     app.include_router(search_debug_router, prefix="/api")
     app.include_router(query_router, prefix="/api")
     app.include_router(query_stream_router, prefix="/api")
+    app.include_router(google_router, prefix="/api")
 
     return app
 

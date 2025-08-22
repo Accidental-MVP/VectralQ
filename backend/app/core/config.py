@@ -50,6 +50,17 @@ class Settings:
     llm_temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
     answer_json_required: bool = os.getenv("ANSWER_JSON_REQUIRED", "true").lower() == "true"
 
+    # Google Drive connector
+    google_client_id: str | None = os.getenv("GOOGLE_CLIENT_ID")
+    google_client_secret: str | None = os.getenv("GOOGLE_CLIENT_SECRET")
+    google_redirect_uri: str | None = os.getenv("GOOGLE_REDIRECT_URI")
+    google_drive_scopes: str = os.getenv(
+        "GOOGLE_DRIVE_SCOPES", "https://www.googleapis.com/auth/drive.readonly"
+    )
+    google_token_encryption_key: str | None = os.getenv("GOOGLE_TOKEN_ENCRYPTION_KEY")
+    sync_page_size: int = int(os.getenv("SYNC_PAGE_SIZE", "1000"))
+    max_file_bytes: int = int(os.getenv("MAX_FILE_BYTES", str(20 * 1024 * 1024)))
+
     def validate(self) -> None:
         # Clamp and validate search settings
         if self.search_top_k_default <= 0:
