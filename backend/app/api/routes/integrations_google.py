@@ -242,6 +242,39 @@ async def _with_retry(call):
             raise
 
 
+async def _force_refresh_access_token(session: AsyncSession, tenant_id: str) -> str:
+    # Refresh using stored refresh_token and persist new access token/expiry
+    res = await session.execute(
+        text(
+            """
+            SELECT refresh_token FROM app.oauth_credentials
+            WHERE tenant_id = :t AND provider='google_drive'
+            """
+        ),
+        {"t": tenant_id},
+    )
+    row = res.first()
+    if not row or not row[0]:
+        raise HTTPException(status_code=401, detail="Missing refresh token")
+    refresh_token = decrypt_json(row[0]).get("refresh_token")
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+    refreshed = await _refresh_token(refresh_token)
+    new_expiry = _now_utc() + timedelta(seconds=int(refreshed.get("expires_in", 3600)))
+    enc = encrypt_json({"access_token": refreshed.get("access_token")})
+    await session.execute(
+        text(
+            """
+            UPDATE app.oauth_credentials
+            SET access_token=:a, expiry=:e, updated_at=NOW()
+            WHERE tenant_id=:t AND provider='google_drive'
+            """
+        ),
+        {"a": enc, "e": new_expiry, "t": tenant_id},
+    )
+    await session.commit()
+    return refreshed.get("access_token")
+
 def _is_supported_mime(mime: str) -> bool:
     if mime == "application/pdf":
         return True
