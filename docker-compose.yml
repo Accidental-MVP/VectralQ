@@ -40,7 +40,8 @@ services:
       LLM_BASE_URL: http://host.docker.internal:11435
       LLM_MODEL: llama3.1:8b-instruct-q4_K_M
       LLM_TIMEOUT_MS: "30000"
-      LLM_MAX_TOKENS: "500"
+      LLM_MAX_TOKENS: "64"
+      CONTEXT_MAX_CHUNKS: "2"
       LLM_TEMPERATURE: "0.0"
       ANSWER_JSON_REQUIRED: "true"
     depends_on:
