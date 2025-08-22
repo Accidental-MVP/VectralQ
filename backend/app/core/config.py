@@ -61,6 +61,9 @@ class Settings:
     sync_page_size: int = int(os.getenv("SYNC_PAGE_SIZE", "1000"))
     max_file_bytes: int = int(os.getenv("MAX_FILE_BYTES", str(20 * 1024 * 1024)))
 
+    # Frontend URL for redirects after OAuth
+    frontend_base_url: str = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000")
+
     def validate(self) -> None:
         # Clamp and validate search settings
         if self.search_top_k_default <= 0:

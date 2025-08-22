@@ -23,6 +23,7 @@ router = APIRouter(prefix="/query", tags=["query"])
 class QueryOptions(BaseModel):
     top_k: Optional[int] = 6
     max_tokens: Optional[int] = 600
+    sources: Optional[List[str]] = Field(default=None, description="Limit retrieval to sources, e.g., ['google_drive']")
 
 
 class QueryRequest(BaseModel):
@@ -57,8 +58,11 @@ async def query(
 
     t0 = time.perf_counter()
     # Retrieval via existing services
-    bm25_results = await run_bm25(session, q, settings.search_bm25_limit, None)
-    vector_results = await run_vector(session, q, settings.search_vector_limit, None)
+    filters: Dict[str, Any] | None = None
+    if opts.sources:
+        filters = {"source": list(opts.sources)}
+    bm25_results = await run_bm25(session, q, settings.search_bm25_limit, filters)
+    vector_results = await run_vector(session, q, settings.search_vector_limit, filters)
     fused_results = fuse_candidates(
         bm25_results,
         vector_results,

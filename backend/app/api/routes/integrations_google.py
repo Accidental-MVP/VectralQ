@@ -174,7 +174,9 @@ async def oauth_callback(
             await unset_tenant_id(session)
         except Exception:
             pass
-    return RedirectResponse(url="/dashboard/connectors?connected=google_drive")
+    # After successful auth, redirect to frontend dashboard with tenant in URL so it can restore context
+    dashboard_url = f"{get_settings().frontend_base_url}/?connected=google_drive&tenant={tenant_id}"
+    return RedirectResponse(url=dashboard_url)
 
 
 async def _get_start_page_token(tok: str) -> str:

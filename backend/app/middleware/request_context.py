@@ -16,6 +16,15 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         request_id_var.set(request_id)
 
         tenant_header = get_settings().tenant_header
+        # Allow CORS preflight to pass without tenant header
+        if request.method.upper() == "OPTIONS":
+            try:
+                response = await call_next(request)
+            finally:
+                request_id_var.set(None)
+                tenant_id_var.set(None)
+            response.headers.setdefault("X-Request-ID", request_id)
+            return response
         tenant_id = request.headers.get(tenant_header)
         if tenant_id is None or tenant_id.strip() == "":
             # Allow specific endpoints (e.g., OAuth callback) to proceed without tenant header.
