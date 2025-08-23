@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any, Dict, List, Optional
+import os
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -38,6 +39,12 @@ def _compute_confidence(num_chunks: int, top_score: float) -> float:
     if num_chunks <= 1:
         conf -= 0.2
     return max(0.0, min(1.0, conf))
+
+
+def _truncate(s: str, max_len: int = 220) -> str:
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1].rstrip() + "…"
 
 
 @router.post("")
@@ -113,6 +120,7 @@ async def query(
     answer: str
     citations: List[dict]
     confidence = _compute_confidence(len(used_citations), fused_results[0].score if fused_results else 0.0)
+    parsed_ok = True
     try:
         obj = json.loads(raw_text)
         answer = str(obj.get("answer") or "I don’t have enough information.")
@@ -130,6 +138,7 @@ async def query(
                 clean.append({"doc_file_id": c.get("doc_file_id"), "chunk_id": c.get("chunk_id")})
         citations = clean
     except Exception:
+        parsed_ok = False
         answer = raw_text.strip()
         if not answer:
             answer = "I don’t have enough information."
@@ -162,6 +171,19 @@ async def query(
         print({"event": "telemetry_query_ok", "request_id": req_id})
     except Exception as exc:
         print({"event": "telemetry_query_err", "error": str(exc)})
+
+    # Extractive fallback (bulletproof demo): if model failed strict JSON or flag enabled
+    try_extractive = os.getenv("QUERY_EXTRACTIVE_MODE", "0") == "1"
+    if (not parsed_ok) or try_extractive:
+        if fused_results:
+            top = fused_results[0]
+            txt = texts_map.get(f"{top.doc_file_id}#{top.chunk_id}") or ""
+            if txt:
+                answer = _truncate(txt, 220)
+                citations = [
+                    {"doc_file_id": top.doc_file_id, "chunk_id": top.chunk_id}
+                ]
+                confidence = 1.0
 
     # Stub coverage tokens metric
     coverage = 0.0

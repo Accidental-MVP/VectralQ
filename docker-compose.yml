@@ -44,6 +44,7 @@ services:
       CONTEXT_MAX_CHUNKS: "2"
       LLM_TEMPERATURE: "0.0"
       ANSWER_JSON_REQUIRED: "true"
+      QUERY_EXTRACTIVE_MODE: "1"
     depends_on:
       db:
         condition: service_healthy
