@@ -12,6 +12,8 @@ from app.api.routes.integrations_google import router as google_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.middleware.request_context import RequestContextMiddleware
+from app.services.embeddings import encode_texts
+from app.services.llm_client import generate_answer, SYSTEM_PROMPT
 
 
 def create_app() -> FastAPI:
@@ -48,6 +50,24 @@ def create_app() -> FastAPI:
     app.include_router(query_router, prefix="/api")
     app.include_router(query_stream_router, prefix="/api")
     app.include_router(google_router, prefix="/api")
+
+    @app.on_event("startup")
+    async def _warmup() -> None:
+        try:
+            # Warm embeddings model
+            encode_texts(["warmup"])
+        except Exception:
+            pass
+        try:
+            # Warm LLM (providers may ignore). Tiny deterministic prompt
+            await generate_answer(
+                SYSTEM_PROMPT,
+                "CONTEXT: warmup\nQUESTION: reply with {\"answer\":\"ok\",\"citations\":[],\"confidence\":1}",
+                citations_hint=[],
+                stream=False,
+            )
+        except Exception:
+            pass
 
     return app
 

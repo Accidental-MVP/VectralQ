@@ -37,11 +37,11 @@ services:
       CROSS_ENCODER_MODEL: "cross-encoder/ms-marco-MiniLM-L-6-v2"
       CROSS_ENCODER_TOP_N: "20"
       DEBUG_SEARCH: "true"
-      LLM_BASE_URL: http://host.docker.internal:11435
-      LLM_MODEL: llama3.1:8b-instruct-q4_K_M
+      LLM_BASE_URL: https://api.openai.com
+      LLM_MODEL: gpt-4o-mini
       LLM_TIMEOUT_MS: "30000"
-      LLM_MAX_TOKENS: "64"
-      CONTEXT_MAX_CHUNKS: "2"
+      LLM_MAX_TOKENS: "32"
+      CONTEXT_MAX_CHUNKS: "1"
       LLM_TEMPERATURE: "0.0"
       ANSWER_JSON_REQUIRED: "true"
       QUERY_EXTRACTIVE_MODE: "1"

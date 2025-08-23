@@ -18,7 +18,8 @@ export default function Home() {
   );
   const [status, setStatus] = useState<string>("Unknown");
   const [state, setState] = useState<ConnectorState | null>(null);
-  const backend = useMemo(() => process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000", []);
+  // Using Next.js rewrites to proxy /api to backend; keep relative /api URLs to avoid CORS
+  const backend = useMemo(() => "", []);
 
   useEffect(() => {
     if (tenantId) {
@@ -43,7 +44,7 @@ export default function Home() {
   async function fetchConnector() {
     if (!tenantId) return;
     try {
-      const res = await fetch(`${backend}/api/integrations/google/oauth/begin`, {
+      const res = await fetch(`/api/integrations/google/oauth/begin`, {
         headers: { "X-Tenant-ID": tenantId },
       });
       if (res.ok) {
@@ -67,7 +68,7 @@ export default function Home() {
   async function syncNow() {
     if (!tenantId) return alert("Enter a Tenant ID first");
     setStatus("Syncing...");
-    const res = await fetch(`${backend}/api/integrations/google/sync`, {
+    const res = await fetch(`/api/integrations/google/sync`, {
       method: "POST",
       headers: { "X-Tenant-ID": tenantId },
     });
@@ -149,7 +150,7 @@ function QueryBox({ tenantId, backend }: { tenantId: string; backend: string }) 
       question: q,
       options: { top_k: 6, sources: ["google_drive"] },
     };
-    const res = await fetch(`${backend}/api/query`, {
+    const res = await fetch(`/api/query`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

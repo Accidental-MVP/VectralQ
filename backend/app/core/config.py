@@ -49,6 +49,8 @@ class Settings:
     llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "600"))
     llm_temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
     answer_json_required: bool = os.getenv("ANSWER_JSON_REQUIRED", "true").lower() == "true"
+    # API key for OpenAI-compatible providers
+    llm_api_key: str | None = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
 
     # Google Drive connector
     google_client_id: str | None = os.getenv("GOOGLE_CLIENT_ID")

@@ -491,6 +491,13 @@ async def sync_now(
             await set_tenant_id(session, tenant_id)
 
     took_ms = int((time.perf_counter() - t0) * 1000)
+    # Kick embeddings for this tenant after sync (fire-and-forget)
+    try:
+        from app.services.embedder_service import embed_missing_for_tenant
+        stats = await embed_missing_for_tenant(session, tenant_id)
+        print({"event": "sync_embed_kick", "tenant": tenant_id, "processed": stats.get("processed")})
+    except Exception as exc:
+        print({"event": "sync_embed_err", "error": str(exc)})
     return {"processed": processed, "deleted": deleted, "skipped": skipped, "took_ms": took_ms}
 
 
