@@ -189,14 +189,34 @@ def fuse_candidates(
                 rrf += 1.0 / (rrf_k + vector_ranks[c.chunk_id_sha1])
             fused_pairs.append((rrf, c))
     else:
-        # linear
-        bm_scores = [c.bm25_score or 0.0 for c in items]
-        sem_scores = [c.semantic_score or 0.0 for c in items]
-        bm_norm = _min_max_normalize(bm_scores)
-        sem_norm = _min_max_normalize(sem_scores)
+        # linear (fallback). Note: we do not zero-fill missing values into normalization baselines.
+        present_bm = [c.bm25_score for c in items if c.bm25_score is not None]
+        present_sem = [c.semantic_score for c in items if c.semantic_score is not None]
+        bm_minmax = _min_max_normalize([float(x) for x in present_bm]) if present_bm else []
+        sem_minmax = _min_max_normalize([float(x) for x in present_sem]) if present_sem else []
+        # Build lookup for normalized scores only where present
+        bm_lookup: Dict[str, float] = {}
+        sem_lookup: Dict[str, float] = {}
+        bi = 0
+        for c in items:
+            if c.bm25_score is not None and bm_minmax:
+                bm_lookup[c.chunk_id_sha1] = bm_minmax[bi]
+                bi += 1
+        si = 0
+        for c in items:
+            if c.semantic_score is not None and sem_minmax:
+                sem_lookup[c.chunk_id_sha1] = sem_minmax[si]
+                si += 1
         fused_pairs = []
-        for i, c in enumerate(items):
-            score = linear_lambda * sem_norm[i] + (1.0 - linear_lambda) * bm_norm[i]
+        for c in items:
+            b = bm_lookup.get(c.chunk_id_sha1)
+            s = sem_lookup.get(c.chunk_id_sha1)
+            parts: List[float] = []
+            if s is not None:
+                parts.append(linear_lambda * s)
+            if b is not None:
+                parts.append((1.0 - linear_lambda) * b)
+            score = sum(parts) if parts else 0.0
             fused_pairs.append((score, c))
 
     # Tie-breakers: higher semantic score, then BM25 rank, then created_at DESC

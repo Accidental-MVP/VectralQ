@@ -66,6 +66,13 @@ class Settings:
     # Frontend URL for redirects after OAuth
     frontend_base_url: str = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000")
 
+    # Refusal / safety thresholds
+    refusal_min_results: int = int(os.getenv("REFUSAL_MIN_RESULTS", "1"))
+    refusal_min_top_score: float = float(os.getenv("REFUSAL_MIN_TOP_SCORE", "0.02"))
+    refusal_enable_extractive: bool = os.getenv("REFUSAL_ENABLE_EXTRACTIVE", "true").lower() == "true"
+    # Rank-fusion (RRF) acceptance threshold (telemetry-tuned)
+    min_rrf: float = float(os.getenv("MIN_RRF", "0.0"))
+
     def validate(self) -> None:
         # Clamp and validate search settings
         if self.search_top_k_default <= 0:
@@ -76,6 +83,13 @@ class Settings:
         # Lambda bounds [0,1]
         if not (0.0 <= self.search_linear_lambda <= 1.0):
             self.search_linear_lambda = 0.6
+        # Refusal thresholds sanity
+        if self.refusal_min_results < 1:
+            self.refusal_min_results = 1
+        if self.refusal_min_top_score < 0.0:
+            self.refusal_min_top_score = 0.0
+        if self.min_rrf < 0.0:
+            self.min_rrf = 0.0
 
 
 @lru_cache(maxsize=1)

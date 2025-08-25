@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any, Dict, Optional
+import re
+import os
 
 import httpx
 
@@ -42,16 +44,25 @@ async def _call_openai_compatible(
             payload["response_format"] = {"type": "json_object"}
     except Exception:
         pass
+    # Build headers (Authorization for OpenAI-compatible; optional org header)
+    api_key = (get_settings().llm_api_key or os.getenv("OPENAI_API_KEY") or "").strip()
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    org = os.getenv("OPENAI_ORG") or os.getenv("OPENAI_ORGANIZATION") or os.getenv("LLM_ORG")
+    if org:
+        headers["OpenAI-Organization"] = org.strip()
+
     async with httpx.AsyncClient(timeout=timeout_ms / 1000) as client:
         if not stream:
-            resp = await client.post(url, json=payload)
+            resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
             return str(content)
         # Streaming path: return concatenated final text
         text_chunks: list[str] = []
-        async with client.stream("POST", url, json=payload) as sresp:
+        async with client.stream("POST", url, json=payload, headers=headers) as sresp:
             sresp.raise_for_status()
             async for line in sresp.aiter_lines():
                 if not line or not line.startswith("data: "):
@@ -83,6 +94,60 @@ def _fallback_generate(user_prompt: str, citations_hint: list[dict[str, str]]) -
     return json.dumps(result)
 
 
+def _try_extract_json(raw_text: str) -> Optional[str]:
+    # Try to extract a JSON object from text with potential code fences / preambles
+    if not raw_text:
+        return None
+    s = raw_text.strip()
+    # Strip common code-fence wrappers
+    if s.startswith("```"):
+        # remove first fence line
+        s = s.split("\n", 1)[1] if "\n" in s else s
+        # remove trailing fence
+        if s.endswith("```"):
+            s = s[: -3]
+    s = s.strip()
+    # Heuristic: find first '{' and last '}' and try to parse the slice
+    l = s.find("{")
+    r = s.rfind("}")
+    if l != -1:
+        # If we have an opening brace but no closing, take from l to end
+        candidate = s[l : (r + 1) if (r != -1 and r > l) else len(s)]
+        try:
+            obj = json.loads(candidate)
+            # Re-emit normalized JSON string
+            return json.dumps(obj)
+        except Exception:
+            # Try balancing braces/brackets by appending missing closers
+            try:
+                open_curly = candidate.count("{")
+                close_curly = candidate.count("}")
+                open_square = candidate.count("[")
+                close_square = candidate.count("]")
+                fix = candidate
+                # Close arrays first, then objects (simple heuristic)
+                if close_square < open_square:
+                    fix += "]" * (open_square - close_square)
+                if close_curly < open_curly:
+                    fix += "}" * (open_curly - close_curly)
+                obj2 = json.loads(fix)
+                return json.dumps(obj2)
+            except Exception:
+                pass
+    # Try to locate JSON block using a regex for top-level braces (best-effort)
+    try:
+        matches = re.findall(r"\{[\s\S]*\}", s)
+        for m in matches:
+            try:
+                obj = json.loads(m)
+                return json.dumps(obj)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
 def _validate_or_fallback(raw_text: str, citations_hint: list[dict[str, str]]) -> str:
     # Ensure valid JSON with required keys; else fallback
     try:
@@ -100,9 +165,30 @@ def _validate_or_fallback(raw_text: str, citations_hint: list[dict[str, str]]) -
             "citations": citations,
             "confidence": float(confidence) if isinstance(confidence, (int, float)) else 0.5,
         })
-    except Exception:
-        # Log minimal marker
-        print({"event": "answer_invalid_json", "raw_len": len(raw_text or "")})
+    except Exception as exc:
+        # Attempt salvage from code-fences / embedded JSON and log diagnostics
+        snippet = (raw_text or "").strip()[:180]
+        has_fence = "```" in (raw_text or "")
+        brace_balance = (raw_text or "").count("{") - (raw_text or "").count("}")
+        extracted = _try_extract_json(raw_text or "")
+        if extracted is not None:
+            print({
+                "event": "answer_invalid_json_salvaged",
+                "raw_len": len(raw_text or ""),
+                "snippet": snippet,
+                "has_code_fence": has_fence,
+                "brace_balance": brace_balance,
+                "reason": str(type(exc).__name__),
+            })
+            return extracted
+        print({
+            "event": "answer_invalid_json",
+            "raw_len": len(raw_text or ""),
+            "snippet": snippet,
+            "has_code_fence": has_fence,
+            "brace_balance": brace_balance,
+            "reason": str(type(exc).__name__),
+        })
         return _fallback_generate("", citations_hint)
 
 
@@ -174,9 +260,18 @@ async def generate_answer_stream(
     except Exception:
         pass
 
+    # Build headers (Authorization for OpenAI-compatible; optional org header)
+    api_key = (settings.llm_api_key or os.getenv("OPENAI_API_KEY") or "").strip()
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    org = os.getenv("OPENAI_ORG") or os.getenv("OPENAI_ORGANIZATION") or os.getenv("LLM_ORG")
+    if org:
+        headers["OpenAI-Organization"] = org.strip()
+
     async with httpx.AsyncClient(timeout=timeout_ms / 1000) as client:
         try:
-            async with client.stream("POST", url, json=payload) as sresp:
+            async with client.stream("POST", url, json=payload, headers=headers) as sresp:
                 sresp.raise_for_status()
                 async for line in sresp.aiter_lines():
                     if not line or not line.startswith("data: "):

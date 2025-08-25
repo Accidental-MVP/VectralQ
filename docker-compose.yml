@@ -37,10 +37,13 @@ services:
       CROSS_ENCODER_MODEL: "cross-encoder/ms-marco-MiniLM-L-6-v2"
       CROSS_ENCODER_TOP_N: "20"
       DEBUG_SEARCH: "true"
+      SEARCH_FUSION_MODE: rrf
+      REFUSAL_MIN_TOP_SCORE: "0.0"
+      MIN_RRF: "0.0"
       LLM_BASE_URL: https://api.openai.com
       LLM_MODEL: gpt-4o-mini
       LLM_TIMEOUT_MS: "30000"
-      LLM_MAX_TOKENS: "32"
+      LLM_MAX_TOKENS: "256"
       CONTEXT_MAX_CHUNKS: "1"
       LLM_TEMPERATURE: "0.0"
       ANSWER_JSON_REQUIRED: "true"

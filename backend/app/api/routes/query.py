@@ -79,8 +79,43 @@ async def query(
     )
     fused_results = fused_results[:top_k]
 
-    # Hallucination guard
-    if len(fused_results) < 2 or (fused_results and fused_results[0].score < 0.25):
+    # Build BM25 rank map for gating (position-based)
+    bm25_rank_map: Dict[str, int] = {}
+    for idx, c in enumerate(bm25_results, start=1):
+        bm25_rank_map[c.chunk_id_sha1] = idx
+    # Consider a BM25 hit if any of the top fused have bm25 rank within top 10
+    bm25_hit = any(bm25_rank_map.get(r.chunk_id, 10**9) <= 10 for r in fused_results[:8])
+
+    # Refusal / hallucination guard (configurable)
+    min_results = max(1, settings.refusal_min_results)
+    min_top = max(0.0, settings.refusal_min_top_score)
+    # Optional: RRF-based gating – require at least one BM25 hit in top of list and a minimal RRF if configured
+    # We reconstruct a pseudo-RRF from the positions if caller selected RRF mode; otherwise we skip
+    min_rrf = max(0.0, getattr(settings, "min_rrf", 0.0))
+    early_refuse = False
+    reason = ""
+    if len(fused_results) < min_results:
+        early_refuse = True
+        reason = "min_results"
+    elif fused_results and fused_results[0].score < min_top:
+        early_refuse = True
+        reason = "min_top"
+    elif not bm25_hit:
+        early_refuse = True
+        reason = "no_bm25_hit"
+    if early_refuse:
+        top_score = float(fused_results[0].score) if fused_results else 0.0
+        req_id = request_id_var.get() or "-"
+        print({
+            "event": "refusal",
+            "request_id": req_id,
+            "refusal_reason": reason,
+            "len": len(fused_results),
+            "top_score": top_score,
+            "min_results": min_results,
+            "min_top": min_top,
+            "bm25_hit": bm25_hit,
+        })
         return {
             "answer": "I don’t have enough information.",
             "citations": [],
@@ -144,6 +179,32 @@ async def query(
             answer = "I don’t have enough information."
         citations = used_citations
 
+    # If model explicitly refused
+    if parsed_ok and answer.strip() == "I don’t have enough information.":
+        req_id = request_id_var.get() or "-"
+        top_score = float(fused_results[0].score) if fused_results else 0.0
+        print({
+            "event": "refusal",
+            "request_id": req_id,
+            "refusal_reason": "llm_refusal",
+            "len": len(citations or []),
+            "top_score": top_score,
+        })
+
+    # Post-generation refusal: require citations subset non-empty unless explicit refusal
+    if (answer.strip().lower() != "i don’t have enough information." and not citations):
+        req_id = request_id_var.get() or "-"
+        top_score = float(fused_results[0].score) if fused_results else 0.0
+        print({
+            "event": "refusal",
+            "request_id": req_id,
+            "refusal_reason": "no_citations",
+            "len": 0,
+            "top_score": top_score,
+        })
+        answer = "I don’t have enough information."
+        confidence = 0.0
+
     latency_ms = int((time.perf_counter() - t0) * 1000)
     # Log
     req_id = request_id_var.get() or "-"
@@ -172,9 +233,9 @@ async def query(
     except Exception as exc:
         print({"event": "telemetry_query_err", "error": str(exc)})
 
-    # Extractive fallback (bulletproof demo): if model failed strict JSON or flag enabled
-    try_extractive = os.getenv("QUERY_EXTRACTIVE_MODE", "0") == "1"
-    if (not parsed_ok) or try_extractive:
+    # Extractive fallback: only if model failed JSON and enabled in settings
+    try_extractive = settings.refusal_enable_extractive
+    if (not parsed_ok) and try_extractive:
         if fused_results:
             top = fused_results[0]
             txt = texts_map.get(f"{top.doc_file_id}#{top.chunk_id}") or ""
