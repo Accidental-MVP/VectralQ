@@ -28,6 +28,8 @@ class Candidate:
     bm25_score: float | None = None
     semantic_score: float | None = None
     headline: str | None = None
+    # Optional pre-fusion bonus (e.g., from phrase lane)
+    phrase_bonus: float | None = None
 
 
 @dataclass
@@ -58,7 +60,16 @@ def _apply_filters_sql(filters: dict[str, Any] | None) -> Tuple[str, Dict[str, A
 
 
 async def run_bm25(session: AsyncSession, query: str, limit: int, filters: dict[str, Any] | None) -> List[Candidate]:
-    ts_sql, ts_params = build_plainto_tsquery(query)
+    settings = get_settings()
+    # Use English websearch parser and weighted tsvector when enabled
+    if settings.bm25_weighted:
+        ts_sql, ts_params = "websearch_to_tsquery('english', :q)", {"q": (query or "").strip()}
+        tsv_col = "c.text_tsv_enw"
+        headline_cfg = "english"
+    else:
+        ts_sql, ts_params = build_plainto_tsquery(query)
+        tsv_col = "c.text_tsv"
+        headline_cfg = "simple"
     filter_sql, filter_params = _apply_filters_sql(filters)
     q = text(
         f"""
@@ -67,12 +78,12 @@ async def run_bm25(session: AsyncSession, query: str, limit: int, filters: dict[
         )
         SELECT c.id, c.tenant_id, c.doc_file_id, c.chunk_id_sha1, c.text, c.token_count,
                f.source, c.created_at,
-               ts_rank_cd(c.text_tsv, q.query) AS rank,
-               ts_headline('simple', c.text, q.query, 'StartSel=<b>,StopSel=</b>,MaxFragments=2,ShortWord=2') AS headline
+               ts_rank_cd({tsv_col}, q.query) AS rank,
+               ts_headline('{headline_cfg}', c.text, q.query, 'StartSel=<b>,StopSel=</b>,MaxFragments=2,ShortWord=2') AS headline
         FROM app.doc_chunks c
         JOIN app.doc_files f ON f.id = c.doc_file_id AND f.deleted_at IS NULL
         CROSS JOIN q
-        WHERE c.text_tsv @@ q.query{filter_sql}
+        WHERE {tsv_col} @@ q.query{filter_sql}
         ORDER BY rank DESC
         LIMIT :limit
         """
@@ -95,6 +106,67 @@ async def run_bm25(session: AsyncSession, query: str, limit: int, filters: dict[
                 headline=(r[9] or None),
             )
         )
+    return out
+
+
+def _extract_phrase(query: str) -> str | None:
+    # Prefer quoted phrase if present
+    q = (query or "").strip()
+    if not q:
+        return None
+    import re
+    m = re.search(r'"([^"]{2,100})"', q)
+    if m:
+        return m.group(1)
+    # Fallback: longest 2-4 word span (very cheap heuristic)
+    tokens = [t for t in re.split(r"\W+", q) if t]
+    best = []
+    for n in (4, 3, 2):
+        for i in range(0, max(0, len(tokens) - n + 1)):
+            span = tokens[i : i + n]
+            if len(" ".join(span)) >= len(" ".join(best)):
+                best = span
+        if best:
+            break
+    return " ".join(best) if best else None
+
+
+async def run_phrase_lane(
+    session: AsyncSession,
+    query: str,
+    limit: int,
+    filters: dict[str, Any] | None,
+) -> Dict[str, float]:
+    """Return chunk_id_sha1 -> phrase rank for exact/phrase matches."""
+    settings = get_settings()
+    if not settings.phrase_lane_enabled:
+        return {}
+    phrase = _extract_phrase(query)
+    if not phrase:
+        return {}
+    filter_sql, filter_params = _apply_filters_sql(filters)
+    tsv_col = "c.text_tsv_enw" if settings.bm25_weighted else "c.text_tsv"
+    q = text(
+        f"""
+        WITH p AS (
+            SELECT phraseto_tsquery('english', :phrase) AS tsq
+        )
+        SELECT c.chunk_id_sha1, ts_rank_cd({tsv_col}, p.tsq) AS phrase_rank
+        FROM app.doc_chunks c
+        JOIN app.doc_files f ON f.id = c.doc_file_id AND f.deleted_at IS NULL, p
+        WHERE {tsv_col} @@ p.tsq{filter_sql}
+        ORDER BY phrase_rank DESC
+        LIMIT :limit
+        """
+    )
+    res = await session.execute(q, {"phrase": phrase, **filter_params, "limit": int(limit)})
+    rows = res.fetchall()
+    out: Dict[str, float] = {}
+    for r in rows:
+        cid = str(r[0])
+        rank = float(r[1]) if r[1] is not None else 0.0
+        if rank > 0:
+            out[cid] = min(1.0, rank)
     return out
 
 
@@ -168,6 +240,9 @@ def fuse_candidates(
             # merge bm25 score onto existing
             if existing.bm25_score is None:
                 existing.bm25_score = c.bm25_score
+        # carry phrase bonus if present
+        if existing is not None and c.phrase_bonus:
+            existing.phrase_bonus = max(existing.phrase_bonus or 0.0, c.phrase_bonus)
     for idx, c in enumerate(vector_list, start=1):
         vector_ranks[c.chunk_id_sha1] = idx
         existing = by_chunk.get(c.chunk_id_sha1)
@@ -176,6 +251,8 @@ def fuse_candidates(
         else:
             if existing.semantic_score is None:
                 existing.semantic_score = c.semantic_score
+        if existing is not None and c.phrase_bonus:
+            existing.phrase_bonus = max(existing.phrase_bonus or 0.0, c.phrase_bonus)
 
     items = list(by_chunk.values())
 
@@ -187,6 +264,8 @@ def fuse_candidates(
                 rrf += 1.0 / (rrf_k + bm25_ranks[c.chunk_id_sha1])
             if c.chunk_id_sha1 in vector_ranks:
                 rrf += 1.0 / (rrf_k + vector_ranks[c.chunk_id_sha1])
+            if c.phrase_bonus:
+                rrf += float(c.phrase_bonus)
             fused_pairs.append((rrf, c))
     else:
         # linear (fallback). Note: we do not zero-fill missing values into normalization baselines.
@@ -217,6 +296,8 @@ def fuse_candidates(
             if b is not None:
                 parts.append((1.0 - linear_lambda) * b)
             score = sum(parts) if parts else 0.0
+            if c.phrase_bonus:
+                score += float(c.phrase_bonus)
             fused_pairs.append((score, c))
 
     # Tie-breakers: higher semantic score, then BM25 rank, then created_at DESC

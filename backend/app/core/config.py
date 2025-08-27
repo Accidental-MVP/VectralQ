@@ -38,6 +38,13 @@ class Settings:
     cross_encoder_top_n: int = int(os.getenv("CROSS_ENCODER_TOP_N", "20"))
     debug_search: bool = os.getenv("DEBUG_SEARCH", "false").lower() == "true"
 
+    # Weighted BM25 and phrase lane toggles
+    bm25_weighted: bool = os.getenv("BM25_WEIGHTED", "false").lower() == "true"
+    phrase_lane_enabled: bool = os.getenv("PHRASE_LANE_ENABLED", "false").lower() == "true"
+    phrase_boost: float = float(os.getenv("PHRASE_BOOST", "0.12"))
+    bm25_k: int = int(os.getenv("BM25_K", "80"))
+    vec_k: int = int(os.getenv("VEC_K", "80"))
+
     # Context packing / generation
     context_max_chunks: int = int(os.getenv("CONTEXT_MAX_CHUNKS", "6"))
     context_token_limit: int = int(os.getenv("CONTEXT_TOKEN_LIMIT", "6000"))

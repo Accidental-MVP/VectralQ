@@ -40,6 +40,12 @@ services:
       SEARCH_FUSION_MODE: rrf
       REFUSAL_MIN_TOP_SCORE: "0.0"
       MIN_RRF: "0.0"
+      BM25_WEIGHTED: "true"
+      PHRASE_LANE_ENABLED: "true"
+      PHRASE_BOOST: "0.12"
+      VEC_STRONG_MIN: "0.3"
+      BM25_RANK_WINDOW: "30"
+      FUSED_TOP_WINDOW: "8"
       LLM_BASE_URL: https://api.openai.com
       LLM_MODEL: gpt-4o-mini
       LLM_TIMEOUT_MS: "30000"

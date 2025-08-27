@@ -169,6 +169,18 @@ async def oauth_callback(
             {"t": tenant_id},
         )
         await session.commit()
+        # After storing credentials, perform one-time full backfill if tenant has no Drive files yet
+        try:
+            await set_tenant_id(session, tenant_id)
+            # Use the fresh access token from OAuth exchange
+            tok = access_token
+            # As a fallback, ensure token is fresh if empty
+            if not tok:
+                tok = await _ensure_access_token(session, tenant_id)
+            await _bootstrap_if_empty(session, tenant_id, tok)
+        except Exception:
+            # Non-fatal; user can click Sync later
+            pass
     finally:
         try:
             await unset_tenant_id(session)
@@ -287,6 +299,143 @@ def _is_supported_mime(mime: str) -> bool:
     return False
 
 
+async def _list_files_initial(tok: str, page_size: int) -> list[dict]:
+    files: list[dict] = []
+    page_token: str | None = None
+    async with httpx.AsyncClient(timeout=30) as client:
+        while True:
+            params: dict[str, Any] = {
+                "pageSize": page_size,
+                "fields": "nextPageToken,files(id,name,mimeType,trashed,md5Checksum,modifiedTime)",
+                "q": "trashed=false",
+                "supportsAllDrives": False,
+                "includeItemsFromAllDrives": False,
+                "spaces": "drive",
+                "corpora": "user",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            r = await _with_retry(lambda: client.get(f"{DRIVE_BASE}/files", params=params, headers={"Authorization": f"Bearer {tok}"}))
+            js = r.json()
+            files.extend(js.get("files", []))
+            page_token = js.get("nextPageToken")
+            if not page_token:
+                break
+    return files
+
+
+async def _bootstrap_if_empty(session: AsyncSession, tenant_id: str, tok: str) -> None:
+    settings = get_settings()
+    cnt_res = await session.execute(
+        text("SELECT COUNT(*) FROM app.doc_files WHERE tenant_id=:t AND source='google_drive'"),
+        {"t": tenant_id},
+    )
+    have_files = int(cnt_res.scalar_one() or 0) > 0
+    if have_files:
+        return
+    initial_files = await _list_files_initial(tok, settings.sync_page_size)
+    for f in initial_files:
+        if not f or f.get("trashed", False):
+            continue
+        mime = f.get("mimeType", "")
+        if not _is_supported_mime(mime):
+            continue
+        fid = f.get("id")
+        data = await _download_file(tok, fid, mime)
+        if len(data) > settings.max_file_bytes:
+            continue
+        import hashlib
+        sha256_hex = hashlib.sha256(data).hexdigest()
+        # Upsert doc_files
+        await set_tenant_id(session, tenant_id)
+        res2 = await session.execute(
+            text("SELECT id, checksum_sha256 FROM app.doc_files WHERE tenant_id=:t AND source='google_drive' AND external_id=:fid LIMIT 1"),
+            {"t": tenant_id, "fid": fid},
+        )
+        row2 = res2.first()
+        if row2 and (row2[1] == sha256_hex):
+            continue
+        if not row2:
+            res3 = await session.execute(
+                text(
+                    """
+                    INSERT INTO app.doc_files (tenant_id, filename, mime_type, size_bytes, sha256, source, ingest_status, external_id, checksum_sha256)
+                    VALUES (:t, :fn, :mt, :sz, :sha, 'google_drive', 'processing', :fid, :fsha)
+                    RETURNING id
+                    """
+                ),
+                {
+                    "t": tenant_id,
+                    "fn": f.get("name") or fid,
+                    "mt": mime,
+                    "sz": len(data),
+                    "sha": sha256_hex,
+                    "fid": fid,
+                    "fsha": sha256_hex,
+                },
+            )
+            doc_file_id = str(res3.scalar_one())
+        else:
+            doc_file_id = str(row2[0])
+            await set_tenant_id(session, tenant_id)
+            await session.execute(
+                text(
+                    """
+                    UPDATE app.doc_files
+                    SET filename=:fn, mime_type=:mt, size_bytes=:sz, sha256=:sha, checksum_sha256=:fsha, ingest_status='processing'
+                    WHERE id=:id
+                    """
+                ),
+                {
+                    "fn": f.get("name") or fid,
+                    "mt": mime,
+                    "sz": len(data),
+                    "sha": sha256_hex,
+                    "fsha": sha256_hex,
+                    "id": doc_file_id,
+                },
+            )
+        # Extract and chunk
+        if mime == "application/pdf":
+            from pathlib import Path
+            import tempfile, os
+            fd, tmp_path = tempfile.mkstemp(prefix="vectralq_gdrive_")
+            try:
+                with os.fdopen(fd, "wb") as out:
+                    out.write(data)
+                text_content = pdf_to_text(Path(tmp_path))
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+        else:
+            text_content = txt_to_text(data)
+        chunks = chunk_text(text_content, tenant_id=tenant_id, doc_file_id=doc_file_id)
+        values = []
+        for (ctext, tcount, cid) in chunks:
+            values.append({
+                "tenant_id": tenant_id,
+                "doc_file_id": doc_file_id,
+                "chunk_id_sha1": cid,
+                "text": ctext.replace("\x00", ""),
+                "token_count": tcount,
+            })
+        if values:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO app.doc_chunks (tenant_id, doc_file_id, chunk_id_sha1, text, token_count)
+                    VALUES (:tenant_id, :doc_file_id, :chunk_id_sha1, :text, :token_count)
+                    ON CONFLICT DO NOTHING
+                    """
+                ),
+                values,
+            )
+        await session.execute(text("UPDATE app.doc_files SET ingest_status='complete' WHERE id=:id"), {"id": doc_file_id})
+        await session.commit()
+
+
 @router.post("/sync")
 async def sync_now(
     session: AsyncSession = Depends(get_tenant_scoped_session),
@@ -296,6 +445,8 @@ async def sync_now(
     # Ensure RLS GUC is set; commits will clear it (transaction-local), so we will reapply after commits
     await set_tenant_id(session, tenant_id)
     tok = await _ensure_access_token(session, tenant_id)
+    # One-time full backfill if empty
+    await _bootstrap_if_empty(session, tenant_id, tok)
 
     # Load connector state
     res = await session.execute(

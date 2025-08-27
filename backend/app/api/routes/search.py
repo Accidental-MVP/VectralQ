@@ -11,7 +11,7 @@ from sqlalchemy import text
 from app.api.deps import get_tenant_scoped_session, get_tenant_id
 from app.core.config import get_settings
 from app.core.logging import request_id_var
-from app.services.search import run_bm25, run_vector, fuse_candidates, build_snippet, maybe_rerank_with_cross_encoder
+from app.services.search import run_bm25, run_vector, fuse_candidates, build_snippet, maybe_rerank_with_cross_encoder, run_phrase_lane
 
 
 router = APIRouter(prefix="/search", tags=["search"])
@@ -43,11 +43,27 @@ async def search(
     top_k = max(1, min(top_k, 50))
     t0 = time.perf_counter()
 
-    bm25_limit = settings.search_bm25_limit
-    vec_limit = settings.search_vector_limit
+    bm25_limit = settings.bm25_k or settings.search_bm25_limit
+    vec_limit = settings.vec_k or settings.search_vector_limit
     filters = body.filters.dict(by_alias=True, exclude_none=True) if body.filters else None
 
+    # Run phrase lane optionally to compute bonus map
+    phrase_map: Dict[str, float] = {}
+    if settings.phrase_lane_enabled:
+        phrase_map = await run_phrase_lane(session, q, bm25_limit, filters)
+
+    # Retrieve candidates
     bm25_results, vector_results = await _run_candidates(session, q, bm25_limit, vec_limit, filters)
+    # Apply phrase bonus to candidates before fusion
+    if phrase_map:
+        for c in bm25_results:
+            bonus = phrase_map.get(c.chunk_id_sha1)
+            if bonus is not None:
+                c.phrase_bonus = settings.phrase_boost * float(bonus > 0)
+        for c in vector_results:
+            bonus = phrase_map.get(c.chunk_id_sha1)
+            if bonus is not None:
+                c.phrase_bonus = settings.phrase_boost * float(bonus > 0)
 
     fused_results = fuse_candidates(
         bm25_results,

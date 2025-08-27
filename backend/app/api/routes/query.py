@@ -13,7 +13,7 @@ from sqlalchemy import text
 from app.api.deps import get_tenant_scoped_session, get_tenant_id
 from app.core.config import get_settings
 from app.core.logging import request_id_var
-from app.services.search import run_bm25, run_vector, fuse_candidates
+from app.services.search import run_bm25, run_vector, fuse_candidates, run_phrase_lane
 from app.services.context_packer import pack_context_from_texts
 from app.services.llm_client import SYSTEM_PROMPT, generate_answer
 
@@ -68,8 +68,22 @@ async def query(
     filters: Dict[str, Any] | None = None
     if opts.sources:
         filters = {"source": list(opts.sources)}
-    bm25_results = await run_bm25(session, q, settings.search_bm25_limit, filters)
-    vector_results = await run_vector(session, q, settings.search_vector_limit, filters)
+    # Optional phrase lane bonus
+    phrase_map: Dict[str, float] = {}
+    if settings.phrase_lane_enabled:
+        phrase_map = await run_phrase_lane(session, q, settings.bm25_k or settings.search_bm25_limit, filters)
+
+    bm25_results = await run_bm25(session, q, settings.bm25_k or settings.search_bm25_limit, filters)
+    vector_results = await run_vector(session, q, settings.vec_k or settings.search_vector_limit, filters)
+    # Apply phrase bonus pre-fusion
+    if phrase_map:
+        boost = get_settings().phrase_boost
+        for c in bm25_results:
+            if c.chunk_id_sha1 in phrase_map:
+                c.phrase_bonus = boost
+        for c in vector_results:
+            if c.chunk_id_sha1 in phrase_map:
+                c.phrase_bonus = boost
     fused_results = fuse_candidates(
         bm25_results,
         vector_results,
@@ -83,14 +97,21 @@ async def query(
     bm25_rank_map: Dict[str, int] = {}
     for idx, c in enumerate(bm25_results, start=1):
         bm25_rank_map[c.chunk_id_sha1] = idx
-    # Consider a BM25 hit if any of the top fused have bm25 rank within top 10
-    bm25_hit = any(bm25_rank_map.get(r.chunk_id, 10**9) <= 10 for r in fused_results[:8])
+    # Vector similarity map for top fused lookups
+    vec_sim_map: Dict[str, float] = {c.chunk_id_sha1: float(c.semantic_score or 0.0) for c in vector_results}
+    # Consider BM25 hit within a relaxed window (default 30) across top fused window (8)
+    bm25_window = int(os.getenv("BM25_RANK_WINDOW", "30"))
+    top_fused_window = int(os.getenv("FUSED_TOP_WINDOW", "8"))
+    bm25_rank_ok = any(bm25_rank_map.get(r.chunk_id, 10**9) <= bm25_window for r in fused_results[:top_fused_window])
+    # Strong vector signal gate for top fused candidate
+    vec_strong_min = float(os.getenv("VEC_STRONG_MIN", "0.78"))
+    top_vec_sim = vec_sim_map.get(fused_results[0].chunk_id, 0.0) if fused_results else 0.0
+    vec_strong = fused_results and (top_vec_sim >= vec_strong_min)
 
     # Refusal / hallucination guard (configurable)
     min_results = max(1, settings.refusal_min_results)
     min_top = max(0.0, settings.refusal_min_top_score)
-    # Optional: RRF-based gating – require at least one BM25 hit in top of list and a minimal RRF if configured
-    # We reconstruct a pseudo-RRF from the positions if caller selected RRF mode; otherwise we skip
+    # Optional: RRF-based gating – minimal RRF if configured (kept but default 0.0)
     min_rrf = max(0.0, getattr(settings, "min_rrf", 0.0))
     early_refuse = False
     reason = ""
@@ -100,9 +121,10 @@ async def query(
     elif fused_results and fused_results[0].score < min_top:
         early_refuse = True
         reason = "min_top"
-    elif not bm25_hit:
+    # Temporary evidence gate: allow if either BM25 is present (within window) OR vector similarity is strong
+    elif not (bm25_rank_ok or vec_strong):
         early_refuse = True
-        reason = "no_bm25_hit"
+        reason = "no_evidence"
     if early_refuse:
         top_score = float(fused_results[0].score) if fused_results else 0.0
         req_id = request_id_var.get() or "-"
@@ -114,7 +136,11 @@ async def query(
             "top_score": top_score,
             "min_results": min_results,
             "min_top": min_top,
-            "bm25_hit": bm25_hit,
+            "bm25_rank_ok": bm25_rank_ok,
+            "vec_strong": bool(vec_strong),
+            "top_vec_sim": float(top_vec_sim),
+            "bm25_window": bm25_window,
+            "top_fused_window": top_fused_window,
         })
         return {
             "answer": "I don’t have enough information.",
