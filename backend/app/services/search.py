@@ -28,6 +28,8 @@ class Candidate:
     bm25_score: float | None = None
     semantic_score: float | None = None
     headline: str | None = None
+    title: str | None = None
+    heading: str | None = None
     # Optional pre-fusion bonus (e.g., from phrase lane)
     phrase_bonus: float | None = None
 
@@ -79,7 +81,8 @@ async def run_bm25(session: AsyncSession, query: str, limit: int, filters: dict[
         SELECT c.id, c.tenant_id, c.doc_file_id, c.chunk_id_sha1, c.text, c.token_count,
                f.source, c.created_at,
                ts_rank_cd({tsv_col}, q.query) AS rank,
-               ts_headline('{headline_cfg}', c.text, q.query, 'StartSel=<b>,StopSel=</b>,MaxFragments=2,ShortWord=2') AS headline
+               ts_headline('{headline_cfg}', c.text, q.query, 'StartSel=<b>,StopSel=</b>,MaxFragments=2,ShortWord=2') AS headline,
+               c.title, c.heading
         FROM app.doc_chunks c
         JOIN app.doc_files f ON f.id = c.doc_file_id AND f.deleted_at IS NULL
         CROSS JOIN q
@@ -104,6 +107,8 @@ async def run_bm25(session: AsyncSession, query: str, limit: int, filters: dict[
                 created_at=str(r[7]),
                 bm25_score=float(r[8]) if r[8] is not None else 0.0,
                 headline=(r[9] or None),
+                title=(r[10] or None),
+                heading=(r[11] or None),
             )
         )
     return out
@@ -332,12 +337,20 @@ async def maybe_rerank_with_cross_encoder(
     top_n = max(1, min(settings.cross_encoder_top_n, len(results)))
     top = results[:top_n]
     pairs: List[Tuple[str, str]] = []
+    # Build compact CE input: [title > heading] + snippet (~400 chars)
     for r in top:
         c = candidate_map.get(r.chunk_id)
         if c is None:
             pairs.append((query, ""))
-        else:
-            pairs.append((query, c.text))
+            continue
+        snippet = build_snippet(c, query) if c is not None else ""
+        prefix_title = (c.title or "").strip()
+        prefix_heading = (c.heading or "").strip()
+        prefix = f"[{prefix_title} > {prefix_heading}] ".strip()
+        ce_text = (prefix + (snippet or c.text or "")).strip()
+        if len(ce_text) > 420:
+            ce_text = ce_text[:420]
+        pairs.append((query, ce_text))
     scores = await rerank_with_cross_encoder(pairs)
     # Replace score with cross-encoder score (or blend later if desired)
     for i, s in enumerate(scores):

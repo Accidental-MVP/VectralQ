@@ -14,6 +14,7 @@ from app.core.logging import configure_logging
 from app.middleware.request_context import RequestContextMiddleware
 from app.services.embeddings import encode_texts
 from app.services.llm_client import generate_answer, SYSTEM_PROMPT
+from app.services.xrerank import _get_cross_encoder
 
 
 def create_app() -> FastAPI:
@@ -66,6 +67,11 @@ def create_app() -> FastAPI:
                 citations_hint=[],
                 stream=False,
             )
+        except Exception:
+            pass
+        try:
+            if get_settings().search_enable_cross_encoder:
+                _get_cross_encoder()
         except Exception:
             pass
 

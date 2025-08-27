@@ -15,7 +15,9 @@ _cross_encoder: CrossEncoder | None = None
 def _get_cross_encoder() -> CrossEncoder:
     global _cross_encoder
     if _cross_encoder is None:
-        model_name = get_settings().cross_encoder_model or "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        s = get_settings()
+        model_name = s.cross_encoder_model or "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        # sentence-transformers CrossEncoder chooses device automatically; keep defaults
         _cross_encoder = CrossEncoder(model_name)
     return _cross_encoder
 
@@ -26,7 +28,7 @@ async def rerank_with_cross_encoder(pairs: List[Tuple[str, str]]) -> List[float]
     model = _get_cross_encoder()
     loop = asyncio.get_event_loop()
     # Run in threadpool to avoid blocking the event loop
-    scores: np.ndarray = await loop.run_in_executor(None, lambda: model.predict(pairs))
+    scores: np.ndarray = await loop.run_in_executor(None, lambda: model.predict(pairs, show_progress_bar=False))
     # Ensure Python floats
     return [float(x) for x in scores.tolist()]
 
