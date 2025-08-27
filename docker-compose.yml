@@ -35,7 +35,7 @@ services:
       EMBEDDING_BATCH_SIZE: "128"
       SEARCH_ENABLE_CROSS_ENCODER: "true"
       CROSS_ENCODER_MODEL: "cross-encoder/ms-marco-MiniLM-L-6-v2"
-      CROSS_ENCODER_TOP_N: "20"
+      CROSS_ENCODER_TOP_N: "12"
       DEBUG_SEARCH: "true"
       SEARCH_FUSION_MODE: rrf
       REFUSAL_MIN_TOP_SCORE: "0.0"

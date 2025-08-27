@@ -416,6 +416,14 @@ async def _bootstrap_if_empty(session: AsyncSession, tenant_id: str, tok: str) -
         for (ctext, tcount, cid) in chunks:
             safe_text = ctext.replace("\x00", "")
             heading = (safe_text.splitlines()[0] if safe_text else "")[:120]
+            # Build sentences JSONB: [{text,start,end,idx}]
+            from app.services.chunk import split_sentences
+            _sents = split_sentences(safe_text)
+            import json as _json
+            sentences_json = _json.dumps([
+                {"text": seg, "start": st, "end": en, "idx": i}
+                for i, (st, en, seg) in enumerate(_sents)
+            ])
             values.append({
                 "tenant_id": tenant_id,
                 "doc_file_id": doc_file_id,
@@ -424,13 +432,14 @@ async def _bootstrap_if_empty(session: AsyncSession, tenant_id: str, tok: str) -
                 "token_count": tcount,
                 "title": f.get("name") or fid,
                 "heading": heading,
+                "sentences": sentences_json,
             })
         if values:
             await session.execute(
                 text(
                     """
-                    INSERT INTO app.doc_chunks (tenant_id, doc_file_id, chunk_id_sha1, text, token_count, title, heading)
-                    VALUES (:tenant_id, :doc_file_id, :chunk_id_sha1, :text, :token_count, :title, :heading)
+                    INSERT INTO app.doc_chunks (tenant_id, doc_file_id, chunk_id_sha1, text, token_count, title, heading, sentences)
+                    VALUES (:tenant_id, :doc_file_id, :chunk_id_sha1, :text, :token_count, :title, :heading, CAST(:sentences AS JSONB))
                     ON CONFLICT DO NOTHING
                     """
                 ),

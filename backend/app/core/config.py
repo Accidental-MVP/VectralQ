@@ -45,6 +45,12 @@ class Settings:
     bm25_k: int = int(os.getenv("BM25_K", "80"))
     vec_k: int = int(os.getenv("VEC_K", "80"))
 
+    # Sentence prefilter / spans
+    sentence_prefilter_top: int = int(os.getenv("SENTENCE_PREFILTER_TOP", "3"))
+    span_picker: bool = os.getenv("SPAN_PICKER", "false").lower() == "true"
+    min_overlap: float = float(os.getenv("MIN_OVERLAP", "0.15"))
+    synthesize_from_spans: bool = os.getenv("SYNTHESIZE_FROM_SPANS", "false").lower() == "true"
+
     # Context packing / generation
     context_max_chunks: int = int(os.getenv("CONTEXT_MAX_CHUNKS", "6"))
     context_token_limit: int = int(os.getenv("CONTEXT_TOKEN_LIMIT", "6000"))

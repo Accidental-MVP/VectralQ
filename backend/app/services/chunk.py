@@ -41,3 +41,20 @@ def chunk_text(text: str, tenant_id: str, doc_file_id: str, target_tokens: int =
     return chunks
 
 
+def split_sentences(text: str) -> List[Tuple[int, int, str]]:
+    # Very lightweight splitter: split on period/question/exclamation; keep indices
+    s: List[Tuple[int, int, str]] = []
+    start = 0
+    for i, ch in enumerate(text):
+        if ch in ".!?":
+            seg = text[start : i + 1].strip()
+            if seg:
+                s.append((start, i + 1, seg))
+            start = i + 1
+    if start < len(text):
+        tail = text[start:].strip()
+        if tail:
+            s.append((start, len(text), tail))
+    return s
+
+
