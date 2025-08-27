@@ -414,19 +414,23 @@ async def _bootstrap_if_empty(session: AsyncSession, tenant_id: str, tok: str) -
         chunks = chunk_text(text_content, tenant_id=tenant_id, doc_file_id=doc_file_id)
         values = []
         for (ctext, tcount, cid) in chunks:
+            safe_text = ctext.replace("\x00", "")
+            heading = (safe_text.splitlines()[0] if safe_text else "")[:120]
             values.append({
                 "tenant_id": tenant_id,
                 "doc_file_id": doc_file_id,
                 "chunk_id_sha1": cid,
-                "text": ctext.replace("\x00", ""),
+                "text": safe_text,
                 "token_count": tcount,
+                "title": f.get("name") or fid,
+                "heading": heading,
             })
         if values:
             await session.execute(
                 text(
                     """
-                    INSERT INTO app.doc_chunks (tenant_id, doc_file_id, chunk_id_sha1, text, token_count)
-                    VALUES (:tenant_id, :doc_file_id, :chunk_id_sha1, :text, :token_count)
+                    INSERT INTO app.doc_chunks (tenant_id, doc_file_id, chunk_id_sha1, text, token_count, title, heading)
+                    VALUES (:tenant_id, :doc_file_id, :chunk_id_sha1, :text, :token_count, :title, :heading)
                     ON CONFLICT DO NOTHING
                     """
                 ),
@@ -589,6 +593,8 @@ async def sync_now(
             values = []
             for (ctext, tcount, cid) in chunks:
                 safe_text = ctext.replace("\x00", "")
+                # Derive heading as first line (best-effort)
+                heading = (safe_text.splitlines()[0] if safe_text else "")[:120]
                 values.append(
                     {
                         "tenant_id": tenant_id,
@@ -596,14 +602,16 @@ async def sync_now(
                         "chunk_id_sha1": cid,
                         "text": safe_text,
                         "token_count": tcount,
+                        "title": f.get("name") or fid,
+                        "heading": heading,
                     }
                 )
             if values:
                 await session.execute(
                     text(
                         """
-                        INSERT INTO app.doc_chunks (tenant_id, doc_file_id, chunk_id_sha1, text, token_count)
-                        VALUES (:tenant_id, :doc_file_id, :chunk_id_sha1, :text, :token_count)
+                        INSERT INTO app.doc_chunks (tenant_id, doc_file_id, chunk_id_sha1, text, token_count, title, heading)
+                        VALUES (:tenant_id, :doc_file_id, :chunk_id_sha1, :text, :token_count, :title, :heading)
                         ON CONFLICT DO NOTHING
                         """
                     ),
