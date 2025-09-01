@@ -14,6 +14,7 @@ from app.core.config import get_settings
 from app.core.logging import request_id_var, tenant_id_var
 from app.services.queries import build_plainto_tsquery, embed_query, vector_literal_from_numpy, html_safe_snippet
 from app.services.xrerank import rerank_with_cross_encoder
+from app.utils.normalize import normalize_query
 
 
 @dataclass
@@ -213,6 +214,57 @@ async def run_vector(session: AsyncSession, query: str, limit: int, filters: dic
     return out
 
 
+async def run_trigram(
+    session: AsyncSession,
+    query: str,
+    limit: int,
+    filters: dict[str, Any] | None,
+) -> List[Candidate]:
+    """Optional fuzzy lane using pg_trgm similarity on normalized text.
+    Requires pg_trgm enabled and a suitable index on normalized chunk text.
+    """
+    settings = get_settings()
+    if not settings.fuzzy_trigram_enabled:
+        return []
+    qn = normalize_query(query or "")
+    if not qn:
+        return []
+    filter_sql, filter_params = _apply_filters_sql(filters)
+    # Assume we search in c.text (fallback) with similarity(); callers should add index in DB init
+    # Use show_limit via LIMIT to bound cost
+    q = text(
+        f"""
+        SELECT c.id, c.tenant_id, c.doc_file_id, c.chunk_id_sha1, c.text, c.token_count,
+               f.source, c.created_at,
+               similarity(lower(unaccent(c.text)), :qnorm) AS sim
+        FROM app.doc_chunks c
+        JOIN app.doc_files f ON f.id = c.doc_file_id AND f.deleted_at IS NULL
+        WHERE similarity(lower(unaccent(c.text)), :qnorm) >= :min_sim{filter_sql}
+        ORDER BY sim DESC
+        LIMIT :limit
+        """
+    )
+    res = await session.execute(q, {**filter_params, "qnorm": qn, "min_sim": float(settings.trgm_min_sim), "limit": int(limit)})
+    rows = res.fetchall()
+    out: List[Candidate] = []
+    for r in rows:
+        out.append(
+            Candidate(
+                id=str(r[0]),
+                tenant_id=str(r[1]),
+                doc_file_id=str(r[2]),
+                chunk_id_sha1=str(r[3]),
+                text=r[4] or "",
+                token_count=int(r[5]) if r[5] is not None else None,
+                source=str(r[6]) if r[6] is not None else None,
+                created_at=str(r[7]),
+                bm25_score=None,
+                semantic_score=float(r[8]) if r[8] is not None else 0.0,
+            )
+        )
+    return out
+
+
 def _min_max_normalize(values: List[float]) -> List[float]:
     if not values:
         return []
@@ -230,6 +282,7 @@ def fuse_candidates(
     mode: str,
     linear_lambda: float,
     rrf_k: int,
+    trigram_list: List[Candidate] | None = None,
 ) -> List[ScoredResult]:
     # Index by chunk_id_sha1 to deduplicate
     by_chunk: Dict[str, Candidate] = {}
@@ -251,6 +304,14 @@ def fuse_candidates(
             existing.phrase_bonus = max(existing.phrase_bonus or 0.0, c.phrase_bonus)
     for idx, c in enumerate(vector_list, start=1):
         vector_ranks[c.chunk_id_sha1] = idx
+    # Optional: incorporate trigram lane as a small bonus, never outrank strong phrase/BM25 entirely
+    trigram_bonus: Dict[str, float] = {}
+    if trigram_list:
+        # Normalize trigram sim to [0,1] across its own list, map to weight
+        sims = [float(c.semantic_score or 0.0) for c in trigram_list]
+        sim_minmax = _min_max_normalize(sims) if sims else []
+        for i, c in enumerate(trigram_list):
+            trigram_bonus[c.chunk_id_sha1] = (sim_minmax[i] if sim_minmax else 0.0) * float(get_settings().trgm_weight)
         existing = by_chunk.get(c.chunk_id_sha1)
         if existing is None or (c.semantic_score or 0) > (existing.semantic_score or 0):
             by_chunk[c.chunk_id_sha1] = c
@@ -272,6 +333,8 @@ def fuse_candidates(
                 rrf += 1.0 / (rrf_k + vector_ranks[c.chunk_id_sha1])
             if c.phrase_bonus:
                 rrf += float(c.phrase_bonus)
+            if trigram_bonus:
+                rrf += float(trigram_bonus.get(c.chunk_id_sha1, 0.0))
             fused_pairs.append((rrf, c))
     else:
         # linear (fallback). Note: we do not zero-fill missing values into normalization baselines.
@@ -304,6 +367,8 @@ def fuse_candidates(
             score = sum(parts) if parts else 0.0
             if c.phrase_bonus:
                 score += float(c.phrase_bonus)
+            if trigram_bonus:
+                score += float(trigram_bonus.get(c.chunk_id_sha1, 0.0))
             fused_pairs.append((score, c))
 
     # Tie-breakers: higher semantic score, then BM25 rank, then created_at DESC

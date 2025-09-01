@@ -12,7 +12,7 @@ from sqlalchemy import text
 from app.api.deps import get_tenant_scoped_session, get_tenant_id
 from app.core.config import get_settings
 from app.core.logging import request_id_var
-from app.services.search import run_bm25, run_vector, fuse_candidates, build_snippet, maybe_rerank_with_cross_encoder, run_phrase_lane
+from app.services.search import run_bm25, run_vector, fuse_candidates, build_snippet, maybe_rerank_with_cross_encoder, run_phrase_lane, run_trigram
 
 
 router = APIRouter(prefix="/search", tags=["search"])
@@ -56,7 +56,12 @@ async def search(
     # Retrieve candidates concurrently
     bm_task = asyncio.create_task(run_bm25(session, q, bm25_limit, filters))
     ve_task = asyncio.create_task(run_vector(session, q, vec_limit, filters))
-    bm25_results, vector_results = await asyncio.gather(bm_task, ve_task)
+    tr_task = asyncio.create_task(run_trigram(session, q, 80, filters)) if get_settings().fuzzy_trigram_enabled else None
+    if tr_task:
+        bm25_results, vector_results, trigram_results = await asyncio.gather(bm_task, ve_task, tr_task)
+    else:
+        bm25_results, vector_results = await asyncio.gather(bm_task, ve_task)
+        trigram_results = []
     # Apply phrase bonus to candidates before fusion
     if phrase_map:
         for c in bm25_results:
@@ -74,6 +79,7 @@ async def search(
         mode=settings.search_fusion_mode,
         linear_lambda=settings.search_linear_lambda,
         rrf_k=settings.search_rrf_k,
+        trigram_list=trigram_results,
     )
 
     # Optional cross-encoder rerank

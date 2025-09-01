@@ -14,7 +14,7 @@ from sqlalchemy import text
 from app.api.deps import get_tenant_scoped_session, get_tenant_id
 from app.core.config import get_settings
 from app.core.logging import request_id_var
-from app.services.search import run_bm25, run_vector, fuse_candidates
+from app.services.search import run_bm25, run_vector, fuse_candidates, run_trigram
 from app.services.llm_client import LLM_FIRST_SYSTEM_PROMPT, generate_answer_stream
 from app.services.answer_verifier import verify_and_normalize_answer
 
@@ -54,12 +54,14 @@ async def query_stream(
         # Retrieval
         bm25_results = await run_bm25(session, q, settings.search_bm25_limit, None)
         vector_results = await run_vector(session, q, settings.search_vector_limit, None)
+        trigram_results = await run_trigram(session, q, 80, None) if get_settings().fuzzy_trigram_enabled else []
         fused_results = fuse_candidates(
             bm25_results,
             vector_results,
             mode=settings.search_fusion_mode,
             linear_lambda=settings.search_linear_lambda,
             rrf_k=settings.search_rrf_k,
+            trigram_list=trigram_results,
         )
         fused_results = fused_results[:top_k]
         yield await sse_event({"phase": "retrieved", "num": len(fused_results)})

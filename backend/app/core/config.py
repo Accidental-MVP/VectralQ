@@ -39,6 +39,13 @@ class Settings:
     ce_sentence_top_n: int = int(os.getenv("CE_SENTENCE_TOP_N", "30"))
     debug_search: bool = os.getenv("DEBUG_SEARCH", "false").lower() == "true"
 
+    # Fuzzy / trigram & spelling (Phase 2)
+    fuzzy_trigram_enabled: bool = os.getenv("FUZZY_TRIGRAM_ENABLED", "true").lower() == "true"
+    trgm_min_sim: float = float(os.getenv("TRGM_MIN_SIM", "0.30"))
+    trgm_weight: float = float(os.getenv("TRGM_WEIGHT", "0.2"))
+    spell_suggest_enabled: bool = os.getenv("SPELL_SUGGEST_ENABLED", "false").lower() == "true"
+    spell_max_alts: int = int(os.getenv("SPELL_MAX_ALTS", "2"))
+
     # Weighted BM25 and phrase lane toggles
     bm25_weighted: bool = os.getenv("BM25_WEIGHTED", "true").lower() == "true"
     phrase_lane_enabled: bool = os.getenv("PHRASE_LANE_ENABLED", "true").lower() == "true"

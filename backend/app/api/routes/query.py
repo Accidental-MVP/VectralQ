@@ -15,7 +15,7 @@ from sqlalchemy import text
 from app.api.deps import get_tenant_scoped_session, get_tenant_id
 from app.core.config import get_settings
 from app.core.logging import request_id_var
-from app.services.search import run_bm25, run_vector, fuse_candidates, run_phrase_lane
+from app.services.search import run_bm25, run_vector, fuse_candidates, run_phrase_lane, run_trigram
 from app.services.context_packer import pack_context_from_texts
 from app.services.llm_client import SYSTEM_PROMPT, LLM_FIRST_SYSTEM_PROMPT, generate_answer
 from app.services.xrerank import rerank_with_cross_encoder
@@ -315,7 +315,12 @@ async def query(
     t_bm = time.perf_counter()
     bm_task = asyncio.create_task(run_bm25(session, q, settings.bm25_k or settings.search_bm25_limit, filters))
     ve_task = asyncio.create_task(run_vector(session, q, settings.vec_k or settings.search_vector_limit, filters))
-    bm25_results, vector_results = await asyncio.gather(bm_task, ve_task)
+    tr_task = asyncio.create_task(run_trigram(session, q, 80, filters)) if get_settings().fuzzy_trigram_enabled else None
+    if tr_task:
+        bm25_results, vector_results, trigram_results = await asyncio.gather(bm_task, ve_task, tr_task)
+    else:
+        bm25_results, vector_results = await asyncio.gather(bm_task, ve_task)
+        trigram_results = []
     bm25_ms = int((time.perf_counter() - t_bm) * 1000)
     # Apply phrase bonus pre-fusion
     if phrase_map:
@@ -333,6 +338,7 @@ async def query(
         mode=settings.search_fusion_mode,
         linear_lambda=settings.search_linear_lambda,
         rrf_k=settings.search_rrf_k,
+        trigram_list=trigram_results,
     )
     fuse_ms = int((time.perf_counter() - t_fuse) * 1000)
     fused_results = fused_results[:top_k]
