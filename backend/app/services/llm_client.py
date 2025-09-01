@@ -261,7 +261,8 @@ async def generate_answer_stream(
     base_url = settings.llm_base_url
     model = settings.llm_model or "gpt-oss-20b"
     timeout_ms = settings.llm_timeout_ms
-    max_tokens = settings.llm_max_tokens
+    # Prefer stream-specific cap when provided
+    max_tokens = getattr(settings, "llm_stream_max_tokens", settings.llm_max_tokens)
     temperature = settings.llm_temperature
 
     if not base_url:

@@ -15,8 +15,8 @@ from app.api.deps import get_tenant_scoped_session, get_tenant_id
 from app.core.config import get_settings
 from app.core.logging import request_id_var
 from app.services.search import run_bm25, run_vector, fuse_candidates
-from app.services.context_packer import pack_context_from_texts
-from app.services.llm_client import SYSTEM_PROMPT, generate_answer, generate_answer_stream
+from app.services.llm_client import LLM_FIRST_SYSTEM_PROMPT, generate_answer_stream
+from app.services.answer_verifier import verify_and_normalize_answer
 
 
 router = APIRouter(prefix="/query", tags=["query-stream"])
@@ -75,7 +75,7 @@ async def query_stream(
             })
             return
 
-        # Fetch texts and pack
+        # Fetch texts for top fused
         id_pairs = [(r.doc_file_id, r.chunk_id) for r in fused_results]
         texts_map: Dict[str, str] = {}
         for doc_id, chunk_id in id_pairs:
@@ -86,18 +86,37 @@ async def query_stream(
             row = res.first()
             if row:
                 texts_map[f"{doc_id}#{chunk_id}"] = row[0]
-        triples = [(r.doc_file_id, r.chunk_id, texts_map.get(f"{r.doc_file_id}#{r.chunk_id}", "")) for r in fused_results]
-        packed = pack_context_from_texts(q, triples)
-        yield await sse_event({"phase": "packed", "chunks": len(packed.used_citations), "tokens": packed.total_tokens})
+        # Build spans payload (LLM-first): use top K with inline tag markers
+        max_spans = max(1, min(settings.max_spans, len(fused_results))) if hasattr(settings, "max_spans") else min(6, len(fused_results))
+        spans_payload: List[str] = []
+        spans_texts: List[str] = []
+        used_citations: List[Dict[str, str]] = []
+        for idx, r in enumerate(fused_results[:max_spans], start=1):
+            key = f"{r.doc_file_id}#{r.chunk_id}"
+            txt = (texts_map.get(key, "") or "").strip()
+            if not txt:
+                continue
+            # Pick first non-empty line as span; inline tag
+            first_line = next((ln.strip() for ln in txt.splitlines() if ln.strip()), "")
+            if not first_line:
+                continue
+            tag = f"[D{idx}:S1]"
+            spans_payload.append(f"{tag} \"{first_line[:240]}\"")
+            spans_texts.append(first_line)
+            used_citations.append({"doc_file_id": r.doc_file_id, "chunk_id": r.chunk_id})
+        yield await sse_event({"phase": "packed", "chunks": len(used_citations)})
 
-        # Try real provider streaming; if it fails, fallback to fake
-        # Try provider streaming, yield deltas as they arrive
+        # Try provider streaming (LLM-first), yield deltas as they arrive
         stream_text = ""
         try:
             async for delta in generate_answer_stream(
-                SYSTEM_PROMPT,
-                f"QUESTION:\n{q}\n\nCONTEXT:\n{packed.packed_context}",
-                citations_hint=packed.used_citations,
+                LLM_FIRST_SYSTEM_PROMPT,
+                json.dumps({
+                    "question": q,
+                    "evidence": spans_payload,
+                    "format": {"answer": "<1-3 sentences with [Dx:Sy] each>", "citations": [], "confidence": 0.0}
+                }, ensure_ascii=False),
+                citations_hint=used_citations,
             ):
                 stream_text += delta
                 yield await sse_event({"delta": delta})
@@ -106,7 +125,7 @@ async def query_stream(
 
         if not stream_text:
             # Fake streaming fallback
-            used = packed.used_citations
+            used = used_citations
             part1 = "Answer: "
             part2 = " ".join([c["doc_file_id"] for c in used[:1]]) or ""
             part3 = "; citations included."
@@ -117,15 +136,13 @@ async def query_stream(
         else:
             final_answer = stream_text
 
+        # Verify final
+        ok, obj = verify_and_normalize_answer(final_answer, spans_texts, used_citations)
         latency_ms = int((time.perf_counter() - t0) * 1000)
-        yield await sse_event({
-            "final": {
-                "answer": final_answer,
-                "citations": packed.used_citations,
-                "confidence": 0.6,
-                "latency_ms": latency_ms,
-            }
-        })
+        if not ok:
+            obj = {"answer": "I don’t have enough information.", "citations": [], "confidence": 0.0}
+        obj["latency_ms"] = latency_ms
+        yield await sse_event({"final": obj})
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

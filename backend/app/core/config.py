@@ -55,12 +55,16 @@ class Settings:
     # Context packing / generation
     context_max_chunks: int = int(os.getenv("CONTEXT_MAX_CHUNKS", "6"))
     context_token_limit: int = int(os.getenv("CONTEXT_TOKEN_LIMIT", "6000"))
+    # Streaming / spans (Phase 1)
+    streaming_enabled: bool = os.getenv("STREAMING_ENABLED", "true").lower() == "true"
+    max_spans: int = int(os.getenv("MAX_SPANS", "6"))
 
     # LLM client
     llm_base_url: str | None = os.getenv("LLM_BASE_URL")
     llm_model: str | None = os.getenv("LLM_MODEL", "gpt-4o-mini")
     llm_timeout_ms: int = int(os.getenv("LLM_TIMEOUT_MS", "8000"))
     llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "600"))
+    llm_stream_max_tokens: int = int(os.getenv("LLM_STREAM_MAX_TOKENS", os.getenv("MAX_TOKENS", "120")))
     llm_temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.0"))
     answer_json_required: bool = os.getenv("ANSWER_JSON_REQUIRED", "true").lower() == "true"
     llm_first: bool = os.getenv("LLM_FIRST", "false").lower() == "true"
