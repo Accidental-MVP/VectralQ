@@ -33,7 +33,7 @@ services:
       EMBEDDING_MODEL_NAME: BAAI/bge-large-en-v1.5
       EMBEDDING_DEVICE: cuda
       EMBEDDING_BATCH_SIZE: "128"
-      SEARCH_ENABLE_CROSS_ENCODER: "true"
+      SEARCH_ENABLE_CROSS_ENCODER: "false"
       CROSS_ENCODER_MODEL: "cross-encoder/ms-marco-MiniLM-L-6-v2"
       CROSS_ENCODER_TOP_N: "8"
       DEBUG_SEARCH: "true"

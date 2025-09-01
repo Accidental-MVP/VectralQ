@@ -40,8 +40,8 @@ class Settings:
     debug_search: bool = os.getenv("DEBUG_SEARCH", "false").lower() == "true"
 
     # Weighted BM25 and phrase lane toggles
-    bm25_weighted: bool = os.getenv("BM25_WEIGHTED", "false").lower() == "true"
-    phrase_lane_enabled: bool = os.getenv("PHRASE_LANE_ENABLED", "false").lower() == "true"
+    bm25_weighted: bool = os.getenv("BM25_WEIGHTED", "true").lower() == "true"
+    phrase_lane_enabled: bool = os.getenv("PHRASE_LANE_ENABLED", "true").lower() == "true"
     phrase_boost: float = float(os.getenv("PHRASE_BOOST", "0.12"))
     bm25_k: int = int(os.getenv("BM25_K", "80"))
     vec_k: int = int(os.getenv("VEC_K", "80"))
@@ -58,10 +58,10 @@ class Settings:
 
     # LLM client
     llm_base_url: str | None = os.getenv("LLM_BASE_URL")
-    llm_model: str | None = os.getenv("LLM_MODEL")
+    llm_model: str | None = os.getenv("LLM_MODEL", "gpt-4o-mini")
     llm_timeout_ms: int = int(os.getenv("LLM_TIMEOUT_MS", "8000"))
     llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "600"))
-    llm_temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+    llm_temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.0"))
     answer_json_required: bool = os.getenv("ANSWER_JSON_REQUIRED", "true").lower() == "true"
     llm_first: bool = os.getenv("LLM_FIRST", "false").lower() == "true"
     # API key for OpenAI-compatible providers
