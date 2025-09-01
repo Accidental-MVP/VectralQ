@@ -36,6 +36,7 @@ class Settings:
     search_enable_cross_encoder: bool = os.getenv("SEARCH_ENABLE_CROSS_ENCODER", "false").lower() == "true"
     cross_encoder_model: str | None = os.getenv("CROSS_ENCODER_MODEL")
     cross_encoder_top_n: int = int(os.getenv("CROSS_ENCODER_TOP_N", "20"))
+    ce_sentence_top_n: int = int(os.getenv("CE_SENTENCE_TOP_N", "30"))
     debug_search: bool = os.getenv("DEBUG_SEARCH", "false").lower() == "true"
 
     # Weighted BM25 and phrase lane toggles
@@ -62,6 +63,7 @@ class Settings:
     llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "600"))
     llm_temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
     answer_json_required: bool = os.getenv("ANSWER_JSON_REQUIRED", "true").lower() == "true"
+    llm_first: bool = os.getenv("LLM_FIRST", "false").lower() == "true"
     # API key for OpenAI-compatible providers
     llm_api_key: str | None = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
 

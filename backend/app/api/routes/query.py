@@ -17,7 +17,9 @@ from app.core.config import get_settings
 from app.core.logging import request_id_var
 from app.services.search import run_bm25, run_vector, fuse_candidates, run_phrase_lane
 from app.services.context_packer import pack_context_from_texts
-from app.services.llm_client import SYSTEM_PROMPT, generate_answer
+from app.services.llm_client import SYSTEM_PROMPT, LLM_FIRST_SYSTEM_PROMPT, generate_answer
+from app.services.xrerank import rerank_with_cross_encoder
+from app.core.tenant_config import get_tenant_hints
 
 
 router = APIRouter(prefix="/query", tags=["query"])
@@ -414,6 +416,9 @@ async def query(
     def _terms(s: str) -> set:
         return set([t.lower() for t in re.findall(r"\w+", s)])
     q_terms = _terms(q)
+    # Basic entity candidates from question (tenant-agnostic): capitalized words, ticker-like tokens, emails/ids
+    Q_ENTITY_RX = re.compile(r"\b([A-Z][A-Za-z]{2,}|[A-Z]{2,6}|[A-Za-z0-9_.-]{3,})\b")
+    q_entities = [m.group(1) for m in Q_ENTITY_RX.finditer(q) if len(m.group(1)) >= 3]
     candidates: List[tuple[str, str, str]] = []  # (doc_id, chunk_id, sentence/span)
     import json as _json
     t_sent_score = time.perf_counter()
@@ -454,6 +459,69 @@ async def query(
             return True
         return False
 
+    # Feature extractors (domain-agnostic)
+    MONEY_RX = re.compile(r"(?i)\b(?:\$|€|£|₹)?\s?\d{1,3}(?:,\d{3})*(?:\.\d+)?\s?(USD|CAD|INR|EUR|usd|cad|inr|eur|%|percent|pct)?\b")
+    DATE_RX = re.compile(r"(?i)\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|q[1-4]|\d{4})\b")
+    DURATION_RX = re.compile(r"(?i)\b\d+\s*(hours?|days?|weeks?|months?|years?)\b")
+    BULLET_RX = re.compile(r"^\s*(?:[-*•\u2022]|\d+\.|\d+\))\s|(?:->|→)")
+    HEADING_HINT_RX = re.compile(r"(?i)^[A-Z][A-Z\s\-:()\d]{4,}$|:\s*$")
+
+    def _entity_overlap(q_ents: list[str], s_text: str) -> float:
+        if not q_ents:
+            return 0.0
+        s_low = (s_text or "").lower()
+        s_ents = set([m.group(1).lower() for m in Q_ENTITY_RX.finditer(s_text or "") if len(m.group(1)) >= 3])
+        qset = set([e.lower() for e in q_ents])
+        if not s_ents:
+            return 0.0
+        inter = len(qset & s_ents)
+        union = len(qset | s_ents)
+        return inter / max(1, union)
+
+    def _has_amount(s_text: str) -> float:
+        return 1.0 if MONEY_RX.search(s_text or "") else 0.0
+
+    def _has_date_or_duration(s_text: str) -> float:
+        return 1.0 if (DATE_RX.search(s_text or "") or DURATION_RX.search(s_text or "")) else 0.0
+
+    def _is_bullet(s_text: str) -> float:
+        return 1.0 if BULLET_RX.search(s_text or "") else 0.0
+
+    def _is_heading(s_text: str) -> float:
+        return 1.0 if HEADING_HINT_RX.search((s_text or "").strip()) else 0.0
+
+    def _section_depth(s_text: str) -> float:
+        # Approximate depth by leading indentation or ordered list nesting
+        m = re.match(r"^(\s+)", s_text or "")
+        indent = len(m.group(1)) if m else 0
+        depth = 1 if re.match(r"^\s*\d+\.", s_text or "") else 0
+        return float(min(2, (indent // 2) + depth)) / 2.0
+
+    def _entity_value_proximity(q_ents: list[str], s_text: str) -> float:
+        # Token distance between any query entity and any amount
+        toks = re.findall(r"\w+|\S", s_text or "")
+        ent_positions: list[int] = []
+        val_positions: list[int] = []
+        low = [t.lower() for t in toks]
+        qlow = [e.lower() for e in q_ents]
+        for i, t in enumerate(low):
+            if t in qlow:
+                ent_positions.append(i)
+            if MONEY_RX.match(toks[i]) or MONEY_RX.search(toks[i]):
+                val_positions.append(i)
+        if not ent_positions or not val_positions:
+            return 0.0
+        best = min(abs(e - v) for e in ent_positions for v in val_positions)
+        return 1.0 / (1.0 + float(best))
+
+    def _bm25_sentence_lite(qset: set[str], s_text: str) -> float:
+        # Cheap overlap normalized by sentence length (proxy for BM25)
+        stoks = [t.lower() for t in re.findall(r"\w+", s_text or "")]
+        if not stoks:
+            return 0.0
+        inter = len(qset & set(stoks))
+        return inter / (0.5 + len(stoks) ** 0.5)
+
     def _best_line_from_chunk(query_text: str, chunk_text: str) -> str:
         if not chunk_text:
             return ""
@@ -468,8 +536,21 @@ async def query(
                 over = len(q_terms & _terms(ln)) / max(1, len(q_terms))
             except Exception:
                 over = 0.0
-            if over > best_over:
-                best_over = over
+            # Apply same keyword/header bonus as sentence scoring
+            bonus = 0.0
+            if re.compile(r'^[A-Z][A-Z\s\-]+:\s*\([0-9][0-9,\.]*\s*(USD|CAD|INR|EUR|\$|€|£|₹)\)', re.I).search(ln):
+                bonus += 0.20
+            ql = query_text.lower()
+            sl = ln.lower()
+            for kw, wt in {"remaining": 0.45, "total": 0.25, "balance": 0.25, "subtotal": 0.25}.items():
+                if kw in ql:
+                    if kw in sl:
+                        bonus += wt
+                    else:
+                        bonus -= wt * 0.3
+            score = over + bonus
+            if score > best_over:
+                best_over = score
                 best_line = ln
         if not best_line:
             # fallback to first non-empty cleaned line
@@ -493,6 +574,8 @@ async def query(
         QUESTION_RX = re.compile(r'^\s*(what|who|when|where|why|how|do|does|did|is|are|was|were|can|could|should)\b', re.I)
         FACT_RX = re.compile(r'\b(is|are|was|were|has|have|includes|means|=)\b', re.I)
         HAS_FACTUAL = re.compile(r'\b([A-Z][a-z]+|[0-9]{2,}|[0-9]+(?:\.[0-9]+)?\s?(USD|CAD|%|days?))\b')
+        HEADER_TOTAL_RX = re.compile(r'^[A-Z][A-Z\s\-]+:\s*\([0-9][0-9,\.]*\s*(USD|CAD|INR|EUR|\$|€|£|₹)\)', re.I)
+        KEYWORD_WEIGHTS = {"remaining": 0.45, "total": 0.25, "balance": 0.25, "subtotal": 0.25}
         def _sentence_bonus(s: str) -> float:
             bonus = 0.0
             if '?' in s or QUESTION_RX.search(s):
@@ -501,12 +584,22 @@ async def query(
                 bonus += 0.20
             if HAS_FACTUAL.search(s):
                 bonus += 0.10
+            if HEADER_TOTAL_RX.search(s):
+                bonus += 0.20
+            # Keyword alignment with the question (e.g., "remaining", "total")
+            ql = q.lower()
+            sl = s.lower()
+            for kw, wt in KEYWORD_WEIGHTS.items():
+                if kw in ql:
+                    if kw in sl:
+                        bonus += wt
+                    else:
+                        bonus -= wt * 0.3
             if len(s.strip()) < 12:
                 bonus -= 0.10
             return bonus
         scored: List[tuple[float, str]] = []
-        # Entity-first preference: if the query contains candidate symbols/words like ETON, boost spans with those exact tokens
-        q_entities = [t for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]+", q) if len(t) >= 3]
+        # Reuse query entities gathered above
         for obj in arr[:200]:
             stxt = str(obj.get("text") or "").strip()
             if not stxt:
@@ -515,16 +608,36 @@ async def query(
             if not stxt_clean or sum(ch.isalnum() for ch in stxt_clean) < 4:
                 # Skip id-only or degenerate fragments
                 continue
-            over = 0.0
             try:
-                over = len(q_terms & _terms(stxt_clean)) / max(1, len(q_terms))
+                # Feature computation
+                f_amount = _has_amount(stxt_clean)
+                f_date = _has_date_or_duration(stxt_clean)
+                f_ent_overlap = _entity_overlap(q_entities, stxt_clean)
+                f_q_overlap = len(q_terms & _terms(stxt_clean)) / max(1, len(q_terms))
+                f_bullet = _is_bullet(stxt_clean)
+                f_heading = _is_heading(stxt_clean)
+                f_depth = _section_depth(stxt_clean)
+                f_prox = _entity_value_proximity(q_entities, stxt_clean)
+                f_bm25 = _bm25_sentence_lite(q_terms, stxt_clean)
+                # chunk-level vec similarity as a sentence feature
+                f_vec = vec_sim_map.get(str(chunk_id), 0.0)
+                # Weighted blend (intent-agnostic default)
+                score = (
+                    0.35 * f_q_overlap +
+                    0.25 * f_ent_overlap +
+                    0.20 * f_amount +
+                    0.10 * f_prox +
+                    0.08 * f_bm25 +
+                    0.05 * f_bullet +
+                    0.03 * f_heading +
+                    0.05 * f_vec +
+                    0.02 * f_date +
+                    0.02 * f_depth
+                )
+                score += _sentence_bonus(stxt_clean)
             except Exception:
-                over = 0.0
-            entity_bonus = 0.0
-            for ent in q_entities[:4]:
-                if ent.lower() in stxt_clean.lower():
-                    entity_bonus += 0.25
-            scored.append((over + _sentence_bonus(stxt_clean) + entity_bonus, stxt_clean))
+                score = 0.0
+            scored.append((score, stxt_clean))
             try:
                 idx_val = int(obj.get("idx")) if obj.get("idx") is not None else None
             except Exception:
@@ -535,7 +648,7 @@ async def query(
         for _, stxt in scored[:max(1, sentence_top)]:
             candidates.append((str(doc_id), str(chunk_id), stxt))
 
-    # Pick top 1–2 sentences across chunks by overlap+heuristics
+    # Optional CE rerank on sentences: take top N heuristics → CE → top 8
     def _score_sentence(s: str) -> float:
         try:
             j = len(q_terms & _terms(s)) / max(1, len(q_terms))
@@ -544,20 +657,154 @@ async def query(
         # Reuse local regex from above scope
         return j  # already included bonus per-chunk selection
 
+    # Heuristic pre-rank
     candidates.sort(key=lambda t: _score_sentence(t[2]), reverse=True)
-    # QA adjacency: if top is a question, prefer the next sentence in same chunk
-    if candidates:
-        top_doc, top_chunk, top_s = candidates[0]
-        if ('?' in top_s) or re.match(r'^\s*(what|who|when|where|why|how|do|does|did|is|are|was|were|can|could|should)\b', top_s, re.I):
-            idx0 = sent_index_map.get((top_doc, top_chunk, top_s))
-            if idx0 is not None:
-                arr = chunk_sents_map.get((top_doc, top_chunk)) or []
-                if idx0 + 1 < len(arr):
-                    nxt = str((arr[idx0 + 1] or {}).get("text") or "").strip()
-                    nxt = _clean_sentence_text(nxt)
-                    if nxt:
-                        candidates.insert(0, (top_doc, top_chunk, nxt))
-    top_spans = candidates[:2] if candidates else []
+    # Cross-encoder if enabled
+    ce_score_map: Dict[tuple[str, str, str], float] = {}
+    if get_settings().search_enable_cross_encoder and candidates:
+        top_n = min(len(candidates), get_settings().ce_sentence_top_n)
+        pre = candidates[:top_n]
+        pairs = [(q, s) for (_, _, s) in pre]
+        try:
+            ce_scores = await rerank_with_cross_encoder(pairs)
+            # attach scores and rerank
+            tmp = []
+            for i in range(len(pre)):
+                d, c, s = pre[i]
+                sc = float(ce_scores[i]) if i < len(ce_scores) else 0.0
+                ce_score_map[(d, c, s)] = sc
+                tmp.append((sc, pre[i]))
+            tmp.sort(key=lambda x: x[0], reverse=True)
+            # prefer distinct documents
+            seen_docs: set[str] = set()
+            ce_chosen: list[tuple[str,str,str]] = []
+            for _, (d,c,s) in tmp:
+                if d in seen_docs:
+                    continue
+                seen_docs.add(d)
+                ce_chosen.append((d,c,s))
+                if len(ce_chosen) >= 8:
+                    break
+            candidates = ce_chosen + candidates[top_n:]
+            try:
+                print({
+                    "event": "ce_sentence_rerank",
+                    "request_id": request_id_var.get() or "-",
+                    "in_n": len(pre),
+                    "kept": len(ce_chosen),
+                    "total_candidates": len(candidates),
+                })
+            except Exception:
+                pass
+        except Exception as exc:
+            print({"event": "ce_sentence_rerank_error", "error": str(exc)})
+    # Intent classification and final scoring blend
+    INTENT_WEIGHTS = {
+        "quantity":   {"ce":0.5, "amount":0.8, "prox":0.4, "ent":0.3, "bm25":0.2, "heading":0.0, "dur":0.0, "bullet":0.0},
+        "definition": {"ce":0.7, "amount":0.0, "prox":0.0, "ent":0.0, "bm25":0.3, "heading":0.2, "dur":0.0, "bullet":0.0},
+        "policy":     {"ce":0.6, "amount":0.0, "prox":0.0, "ent":0.0, "bm25":0.3, "heading":0.0, "dur":0.3, "bullet":0.2},
+        "entity":     {"ce":0.5, "amount":0.0, "prox":0.4, "ent":0.6, "bm25":0.2, "heading":0.0, "dur":0.0, "bullet":0.0},
+        "default":    {"ce":0.6, "amount":0.2, "prox":0.2, "ent":0.2, "bm25":0.2, "heading":0.1, "dur":0.1, "bullet":0.1},
+    }
+
+    def _detect_intent(text_q: str) -> str:
+        t = text_q.lower()
+        if re.search(r"(?:how\s+many|how\s+much|total|remaining|amount|balance|sum|count|%|percent|pct|\$|€|£|₹)", t):
+            return "quantity"
+        if re.search(r"^(what\s+is|what's|define|definition|meaning)\b", t):
+            return "definition"
+        if re.search(r"\b(can\s+i|when\b|how\s+long|deadline|policy|procedure|process|steps?)\b", t):
+            return "policy"
+        if re.search(r"\b(name|email|role|title|ticker|username|phone)\b", t):
+            return "entity"
+        return "default"
+
+    intent = _detect_intent(q)
+    weights = INTENT_WEIGHTS.get(intent, INTENT_WEIGHTS["default"])
+
+    def _final_score(d: str, c: str, s: str) -> float:
+        ce = ce_score_map.get((d, c, s), 0.0)
+        amount = 1.0 if MONEY_RX.search(s or "") else 0.0
+        prox = _entity_value_proximity(q_entities, s)
+        ento = _entity_overlap(q_entities, s)
+        bm25s = _bm25_sentence_lite(q_terms, s)
+        heading = 1.0 if _is_heading(s) else 0.0
+        dur = 1.0 if _has_date_or_duration(s) else 0.0
+        bullet = 1.0 if _is_bullet(s) else 0.0
+        total = (
+            weights["ce"] * ce +
+            weights["amount"] * amount +
+            weights["prox"] * prox +
+            weights["ent"] * ento +
+            weights["bm25"] * bm25s +
+            weights["heading"] * heading +
+            weights["dur"] * dur +
+            weights["bullet"] * bullet
+        )
+        denom = sum(v for v in weights.values() if v > 0)
+        return total / max(1e-6, denom)
+
+    # Hard gates (fail-closed)
+    # 1) Quantity intent requires at least one span with an amount
+    if intent == "quantity":
+        if not any(MONEY_RX.search(s) for (_, _, s) in candidates):
+            return {
+                "answer": "I don’t have enough information.",
+                "citations": [],
+                "confidence": 0.0,
+                "latency_ms": int((time.perf_counter() - t0) * 1000),
+            }
+    # 2) CE(top) < tau and overlap < epsilon → refuse
+    tau = float(os.getenv("CE_SENTENCE_MIN", "0.40"))
+    eps = float(os.getenv("OVERLAP_MIN", "0.15"))
+    if ce_score_map:
+        best_ce = max(ce_score_map.values()) if ce_score_map else 0.0
+        # compute best overlap on same set
+        best_overlap = 0.0
+        for (d, c, s) in candidates[: min(len(candidates), get_settings().ce_sentence_top_n)]:
+            try:
+                best_overlap = max(best_overlap, len(q_terms & _terms(s)) / max(1, len(q_terms)))
+            except Exception:
+                pass
+        if best_ce < tau and best_overlap < eps:
+            return {
+                "answer": "I don’t have enough information.",
+                "citations": [],
+                "confidence": 0.0,
+                "latency_ms": int((time.perf_counter() - t0) * 1000),
+            }
+    # 3) Evidence gate: require BM25 hit or strong CE (z-score proxy)
+    strong_ce = False
+    if ce_score_map:
+        vals = list(ce_score_map.values())
+        mu = sum(vals) / max(1, len(vals))
+        sigma = (sum((v - mu) ** 2 for v in vals) / max(1, len(vals))) ** 0.5
+        z = (max(vals) - mu) / (sigma + 1e-6)
+        strong_ce = z > 1.0
+    if not (bm25_rank_ok or strong_ce):
+        return {
+            "answer": "I don’t have enough information.",
+            "citations": [],
+            "confidence": 0.0,
+            "latency_ms": int((time.perf_counter() - t0) * 1000),
+        }
+
+    # Rank by final score with distinct-doc preference
+    scored_all: List[tuple[float, tuple[str,str,str]]] = []
+    for d, c, s in candidates:
+        scored_all.append((_final_score(d, c, s), (d, c, s)))
+    scored_all.sort(key=lambda x: x[0], reverse=True)
+    seen_docs: set[str] = set()
+    chosen: list[tuple[str,str,str]] = []
+    for _, triple in scored_all:
+        d, c, s = triple
+        if d in seen_docs:
+            continue
+        seen_docs.add(d)
+        chosen.append(triple)
+        if len(chosen) >= 2:
+            break
+    top_spans = chosen
     overlap_best = (len(q_terms & _terms(top_spans[0][2])) / max(1, len(q_terms))) if top_spans else 0.0
     sent_score_ms = int((time.perf_counter() - t_sent_score) * 1000)
     if not top_spans or overlap_best < get_settings().min_overlap:
@@ -742,6 +989,62 @@ async def query(
             "coverage": 1.0 if used_citations else 0.0,
         }
     else:
+        # LLM-first mode: streamable synthesis with strict evidence rails
+        if settings.llm_first:
+            import json as _json
+            # Build compact evidence: top spans with inline tags for verification
+            spans_payload = []
+            used_citations = []
+            for (d, c, s) in top_spans[:6]:
+                tag = f"[D{len(spans_payload)+1}:S1]"
+                spans_payload.append(f"{tag} \"{_truncate(s, 240)}\"")
+                used_citations.append({"doc_file_id": d, "chunk_id": c})
+            user_prompt_obj = {
+                "question": q,
+                "evidence": spans_payload,
+                "format": {
+                    "answer": "<concise 1-3 sentences with [Dx:Sy] in each>",
+                    "citations": [{"doc_file_id": "...", "chunk_id": "..."}],
+                    "confidence": 0.0
+                }
+            }
+            user_prompt = _json.dumps(user_prompt_obj, ensure_ascii=False)
+            t_llm = time.perf_counter()
+            raw_text = await generate_answer(
+                LLM_FIRST_SYSTEM_PROMPT,
+                user_prompt,
+                citations_hint=used_citations,
+                max_tokens_override=120,
+                temperature_override=0.0,
+            )
+            llm_ms = int((time.perf_counter() - t_llm) * 1000)
+            # Parse and verify minimal constraints
+            try:
+                obj = json.loads(raw_text)
+                ans = str(obj.get("answer") or "").strip()
+                cites = obj.get("citations") or used_citations
+            except Exception:
+                ans = ""
+                cites = used_citations
+            # Verify: at least one [Dx:Sy] per sentence and citations non-empty
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", ans) if s.strip()]
+            has_tags = all(re.search(r"\[D\d+:S\d+\]", s) for s in sentences) if sentences else False
+            if not sentences or not has_tags or not cites:
+                return {
+                    "answer": "I don’t have enough information.",
+                    "citations": [],
+                    "confidence": 0.0,
+                    "latency_ms": int((time.perf_counter() - t0) * 1000),
+                }
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            confidence = _compute_confidence(len(cites), fused_results[0].score if fused_results else 0.0)
+            return {
+                "answer": ans,
+                "citations": cites,
+                "confidence": confidence,
+                "latency_ms": latency_ms,
+                "coverage": 1.0 if cites else 0.0,
+            }
         # Prepare final answer extractively (optional synth kept off for now)
         # Build concise answer from spans, trimming excess whitespace
         answer_text = "\n".join([s.strip() for _, _, s in top_spans if s and s.strip()])
@@ -809,7 +1112,7 @@ async def query(
                 "latency_ms": latency_ms,
                 "coverage": coverage,
             }
-        # If we do synthesize, only do it when pronouns/POV need fixing; else return extractive
+        # If we do synthesize, only for surface form: tiny one-liner rewrite
         NEEDS_REWRITE = re.compile(r"\b(my|our|your)\b", re.I)
         CURRENCY_RX = re.compile(r"\b(USD|CAD|INR|EUR|Rs\.?|₹|\$|€|£|%|\d{1,3}(,\d{3})*(\.\d+)?|\d+\s?(USD|CAD|INR|EUR|%) )\b", re.I)
         ARROW_RX = re.compile(r"(->|→)")
@@ -890,7 +1193,7 @@ async def query(
         SYSTEM_PROMPT,
         user_prompt,
         citations_hint=used_citations,
-        max_tokens_override=min(64, get_settings().llm_max_tokens or 64),
+        max_tokens_override=32,
         temperature_override=0.0,
     )
     llm_ms = int((time.perf_counter() - t_llm) * 1000)
