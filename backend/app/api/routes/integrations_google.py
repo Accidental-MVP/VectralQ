@@ -416,14 +416,54 @@ async def _bootstrap_if_empty(session: AsyncSession, tenant_id: str, tok: str) -
         for (ctext, tcount, cid) in chunks:
             safe_text = ctext.replace("\x00", "")
             heading = (safe_text.splitlines()[0] if safe_text else "")[:120]
-            # Build sentences JSONB: [{text,start,end,idx}]
-            from app.services.chunk import split_sentences
-            _sents = split_sentences(safe_text)
+            # Build sentences JSONB: [{text,start,end,idx}] using bullet-aware spans
+            from app.services.chunk import split_spans
+            _sents = split_spans(safe_text)
             import json as _json
-            sentences_json = _json.dumps([
-                {"text": seg, "start": st, "end": en, "idx": i}
-                for i, (st, en, seg) in enumerate(_sents)
-            ])
+            import re as _re
+            _currency_rx = _re.compile(r"(?i)\b(\d{1,3}(?:,\d{3})*|\d+)(?:\s*(USD|CAD|INR|EUR|\$|€|£|₹|%))\b")
+            _ticker_rx = _re.compile(r"\b[A-Z]{2,5}\b")
+            _name_rx = _re.compile(r"(?i)\b(my\s+name\s+is|i\s+am)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*)")
+            _bullet_mark = ("-", "*", "•")
+            sdicts = []
+            for i, (st, en, seg) in enumerate(_sents):
+                seg_str = (seg or "").strip()
+                if not seg_str:
+                    continue
+                is_bullet = seg_str.lstrip().startswith(_bullet_mark) or ("->" in seg_str) or ("→" in seg_str)
+                amount = None
+                currency = None
+                m_amt = _currency_rx.search(seg_str)
+                if m_amt:
+                    try:
+                        amt_raw = m_amt.group(1).replace(",", "")
+                        amount = float(amt_raw)
+                    except Exception:
+                        amount = None
+                    cur = m_amt.group(2)
+                    currency = {"$": "USD", "€": "EUR", "£": "GBP", "₹": "INR"}.get(cur, cur)
+                ticker = None
+                for m in _ticker_rx.findall(seg_str):
+                    if len(m) >= 3 and m.upper() == m and m not in {"THE","AND","FOR","WITH","THIS","FROM","IN","USD","CAD","EUR","INR"}:
+                        ticker = m
+                        break
+                name_val = None
+                mname = _name_rx.search(seg_str)
+                if mname:
+                    name_val = mname.group(2)
+                sdict = {"text": seg_str, "start": st, "end": en, "idx": i}
+                if is_bullet:
+                    sdict["is_bullet"] = True
+                if amount is not None:
+                    sdict["amount"] = amount
+                if currency:
+                    sdict["currency"] = currency
+                if ticker:
+                    sdict["ticker"] = ticker
+                if name_val:
+                    sdict["name"] = name_val
+                sdicts.append(sdict)
+            sentences_json = _json.dumps(sdicts)
             values.append({
                 "tenant_id": tenant_id,
                 "doc_file_id": doc_file_id,

@@ -12,7 +12,10 @@ from app.core.config import get_settings
 
 
 SYSTEM_PROMPT = (
-    "You are a retrieval-grounded assistant. Answer ONLY using the provided CONTEXT. Return ONLY valid JSON with keys: answer (string), citations (array of {doc_file_id, chunk_id}), confidence (number). If missing info, return: {\"answer\":\"I don’t have enough information.\",\"citations\":[],\"confidence\":0.0}. No extra text."
+    "You are a retrieval-grounded assistant. Use ONLY the provided CONTEXT. "
+    "Return ONLY valid JSON with keys: answer (string), citations (array of {doc_file_id, chunk_id}), confidence (number). "
+    "If the spans clearly contain the answer, provide a concise direct answer (<=20 words) from those spans. "
+    "If information is missing, return exactly: {\"answer\":\"I don’t have enough information.\",\"citations\":[],\"confidence\":0.0}. No extra text."
 )
 
 
@@ -49,17 +52,30 @@ async def _call_openai_compatible(
     headers: Dict[str, str] = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    org = os.getenv("OPENAI_ORG") or os.getenv("OPENAI_ORGANIZATION") or os.getenv("LLM_ORG")
+    # Optional OpenAI headers for org/project scoping (esp. with project-scoped keys)
+    org = os.getenv("OPENAI_ORG_ID") or os.getenv("OPENAI_ORG") or os.getenv("OPENAI_ORGANIZATION") or os.getenv("LLM_ORG")
     if org:
         headers["OpenAI-Organization"] = org.strip()
+    proj = os.getenv("OPENAI_PROJECT_ID") or os.getenv("OPENAI_PROJECT") or os.getenv("LLM_PROJECT")
+    if proj:
+        headers["OpenAI-Project"] = proj.strip()
 
     async with httpx.AsyncClient(timeout=timeout_ms / 1000) as client:
         if not stream:
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-            return str(content)
+            try:
+                content = data["choices"][0]["message"]["content"]
+                return str(content)
+            except Exception:
+                # fallback if provider returns a different shape
+                if isinstance(data, dict):
+                    if "content" in data:
+                        return str(data.get("content"))
+                    if "text" in data:
+                        return str(data.get("text"))
+                return json.dumps({"answer": "I don’t have enough information.", "citations": [], "confidence": 0.0})
         # Streaming path: return concatenated final text
         text_chunks: list[str] = []
         async with client.stream("POST", url, json=payload, headers=headers) as sresp:
@@ -197,13 +213,15 @@ async def generate_answer(
     user_prompt: str,
     citations_hint: list[dict[str, str]] | None = None,
     stream: bool = False,
+    max_tokens_override: int | None = None,
+    temperature_override: float | None = None,
 ) -> str:
     settings = get_settings()
     base_url = settings.llm_base_url
     model = settings.llm_model or "gpt-oss-20b"
     timeout_ms = settings.llm_timeout_ms
-    max_tokens = settings.llm_max_tokens
-    temperature = settings.llm_temperature
+    max_tokens = max_tokens_override if max_tokens_override is not None else settings.llm_max_tokens
+    temperature = temperature_override if temperature_override is not None else settings.llm_temperature
 
     if not base_url:
         return _fallback_generate(user_prompt, citations_hint or [])
@@ -265,9 +283,13 @@ async def generate_answer_stream(
     headers: Dict[str, str] = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    org = os.getenv("OPENAI_ORG") or os.getenv("OPENAI_ORGANIZATION") or os.getenv("LLM_ORG")
+    # Optional OpenAI headers for org/project scoping (esp. with project-scoped keys)
+    org = os.getenv("OPENAI_ORG_ID") or os.getenv("OPENAI_ORG") or os.getenv("OPENAI_ORGANIZATION") or os.getenv("LLM_ORG")
     if org:
         headers["OpenAI-Organization"] = org.strip()
+    proj = os.getenv("OPENAI_PROJECT_ID") or os.getenv("OPENAI_PROJECT") or os.getenv("LLM_PROJECT")
+    if proj:
+        headers["OpenAI-Project"] = proj.strip()
 
     async with httpx.AsyncClient(timeout=timeout_ms / 1000) as client:
         try:

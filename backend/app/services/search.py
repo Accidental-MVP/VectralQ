@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import time
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -348,8 +349,8 @@ async def maybe_rerank_with_cross_encoder(
         prefix_heading = (c.heading or "").strip()
         prefix = f"[{prefix_title} > {prefix_heading}] ".strip()
         ce_text = (prefix + (snippet or c.text or "")).strip()
-        if len(ce_text) > 420:
-            ce_text = ce_text[:420]
+        if len(ce_text) > 300:
+            ce_text = ce_text[:300]
         pairs.append((query, ce_text))
     scores = await rerank_with_cross_encoder(pairs)
     # Replace score with cross-encoder score (or blend later if desired)

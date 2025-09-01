@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from typing import Any, Dict, List, Optional
+import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -52,8 +53,10 @@ async def search(
     if settings.phrase_lane_enabled:
         phrase_map = await run_phrase_lane(session, q, bm25_limit, filters)
 
-    # Retrieve candidates
-    bm25_results, vector_results = await _run_candidates(session, q, bm25_limit, vec_limit, filters)
+    # Retrieve candidates concurrently
+    bm_task = asyncio.create_task(run_bm25(session, q, bm25_limit, filters))
+    ve_task = asyncio.create_task(run_vector(session, q, vec_limit, filters))
+    bm25_results, vector_results = await asyncio.gather(bm_task, ve_task)
     # Apply phrase bonus to candidates before fusion
     if phrase_map:
         for c in bm25_results:
