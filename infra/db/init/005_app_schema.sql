@@ -10,6 +10,7 @@ ALTER ROLE vectralq_app SET search_path = app, public;
 -- Required extensions
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS unaccent;
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- Default privileges so future tables/sequences in schema app are accessible to runtime user
