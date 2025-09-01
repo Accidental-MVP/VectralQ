@@ -57,6 +57,11 @@ services:
       CONTEXT_MAX_CHUNKS: "1"
       LLM_TEMPERATURE: "0.0"
       ANSWER_JSON_REQUIRED: "true"
+      # Phase 1 LLM-first streaming
+      LLM_FIRST: "true"
+      STREAMING_ENABLED: "true"
+      MAX_SPANS: "6"
+      MAX_TOKENS: "120"
       QUERY_EXTRACTIVE_MODE: "1"
       SYNTHESIZE_FROM_SPANS: "true"
       # OpenAI credentials are sourced from your local environment/.env; no secrets are stored in git
