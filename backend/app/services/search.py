@@ -236,10 +236,10 @@ async def run_trigram(
         f"""
         SELECT c.id, c.tenant_id, c.doc_file_id, c.chunk_id_sha1, c.text, c.token_count,
                f.source, c.created_at,
-               similarity(lower(unaccent(c.text)), :qnorm) AS sim
+               similarity(lower(unaccent(COALESCE(c.heading,'') || ' ' || COALESCE(c.title,'') || ' ' || c.text)), :qnorm) AS sim
         FROM app.doc_chunks c
         JOIN app.doc_files f ON f.id = c.doc_file_id AND f.deleted_at IS NULL
-        WHERE similarity(lower(unaccent(c.text)), :qnorm) >= :min_sim{filter_sql}
+        WHERE similarity(lower(unaccent(COALESCE(c.heading,'') || ' ' || COALESCE(c.title,'') || ' ' || c.text)), :qnorm) >= :min_sim{filter_sql}
         ORDER BY sim DESC
         LIMIT :limit
         """
