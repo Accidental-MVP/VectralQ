@@ -321,6 +321,11 @@ def fuse_candidates(
         if existing is not None and c.phrase_bonus:
             existing.phrase_bonus = max(existing.phrase_bonus or 0.0, c.phrase_bonus)
 
+    # Include trigram-only candidates so fuzzy lane can supply items when exact/semantic lanes miss
+    if trigram_list:
+        for c in trigram_list:
+            if c.chunk_id_sha1 not in by_chunk:
+                by_chunk[c.chunk_id_sha1] = c
     items = list(by_chunk.values())
 
     if mode == "rrf":
