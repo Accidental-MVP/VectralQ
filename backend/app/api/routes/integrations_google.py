@@ -290,12 +290,20 @@ async def _force_refresh_access_token(session: AsyncSession, tenant_id: str) -> 
     return refreshed.get("access_token")
 
 def _is_supported_mime(mime: str) -> bool:
+    # Native files we can handle directly
     if mime == "application/pdf":
         return True
     if mime.startswith("text/"):
         return True
-    if mime.startswith("application/vnd.google-apps."):
+
+    # Only support Google Docs and Presentations for export to text
+    if mime in (
+        "application/vnd.google-apps.document",
+        "application/vnd.google-apps.presentation",
+    ):
         return True
+
+    # Other Google types (e.g., spreadsheets, drawings) are currently unsupported
     return False
 
 
@@ -582,6 +590,14 @@ async def sync_now(
                         """
                         INSERT INTO app.doc_files (tenant_id, filename, mime_type, size_bytes, sha256, source, ingest_status, external_id, checksum_sha256)
                         VALUES (:t, :fn, :mt, :sz, :sha, 'google_drive', 'processing', :fid, :fsha)
+                        ON CONFLICT (tenant_id, sha256) DO UPDATE SET
+                            filename = EXCLUDED.filename,
+                            mime_type = EXCLUDED.mime_type,
+                            size_bytes = EXCLUDED.size_bytes,
+                            source = EXCLUDED.source,
+                            external_id = EXCLUDED.external_id,
+                            checksum_sha256 = EXCLUDED.checksum_sha256,
+                            ingest_status = 'processing'
                         RETURNING id
                         """
                     ),
