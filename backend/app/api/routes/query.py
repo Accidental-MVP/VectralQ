@@ -157,7 +157,7 @@ async def query(
             if fast:
                 # Always use tiny LLM for slot-fill; build 1–2 evidence lines containing the entity
                 import json as _json
-                # Fetch up to 2 shortest lines with the entity to prefer bullets over section totals
+                # Fetch up to settings.max_spans shortest lines with the entity to prefer bullets over section totals
                 rows_sf = await session.execute(
                     text(
                         """
@@ -170,10 +170,10 @@ async def query(
                         FROM s
                         WHERE to_tsvector('simple', coalesce(s.s->>'text','')) @@ plainto_tsquery('simple', :entity)
                         ORDER BY length(s.s->>'text') ASC
-                        LIMIT 2;
+                        LIMIT :limit;
                         """
                     ),
-                    {"tenant": tenant_id, "entity": entity},
+                    {"tenant": tenant_id, "entity": entity, "limit": int(settings.max_spans)},
                 )
                 lines = rows_sf.fetchall()
                 evid: List[dict] = []
@@ -195,7 +195,7 @@ async def query(
                     else:
                         if entity.lower() in t.lower():
                             fallback_lines.append(item)
-                evid = (preferred or fallback_lines)[:2]
+                evid = (preferred or fallback_lines)[: min(len(preferred or fallback_lines), settings.max_spans)]
                 if not evid:
                     try:
                         print({
@@ -226,13 +226,13 @@ async def query(
                 if not evid:
                     # fall back to the original fast line
                     evid = [{"text": fast["answer"], "doc_file_id": fast["citations"][0]["doc_file_id"], "chunk_id": fast["citations"][0]["chunk_id"]}]
-                prompt_obj = {"question": q, "spans": evid[:2]}
+                prompt_obj = {"question": q, "spans": evid[: settings.max_spans]}
                 user_prompt = _json.dumps(prompt_obj, ensure_ascii=False)
                 t_llm = time.perf_counter()
                 raw_text = await generate_answer(
                     SYSTEM_PROMPT,
                     user_prompt,
-                    citations_hint=[{"doc_file_id": e["doc_file_id"], "chunk_id": e["chunk_id"]} for e in evid[:2]],
+                    citations_hint=[{"doc_file_id": e["doc_file_id"], "chunk_id": e["chunk_id"]} for e in evid[: settings.max_spans]],
                     max_tokens_override=96,
                     temperature_override=0.0,
                 )
@@ -808,7 +808,7 @@ async def query(
             continue
         seen_docs.add(d)
         chosen.append(triple)
-        if len(chosen) >= 2:
+        if len(chosen) >= settings.max_spans:
             break
     top_spans = chosen
     overlap_best = (len(q_terms & _terms(top_spans[0][2])) / max(1, len(q_terms))) if top_spans else 0.0
@@ -830,10 +830,10 @@ async def query(
                         FROM s
                         WHERE to_tsvector('simple', coalesce(s.s->>'text','')) @@ plainto_tsquery('simple', :entity)
                         ORDER BY length(s.s->>'text') ASC
-                        LIMIT 3;
+                        LIMIT :limit;
                         """
                     ),
-                    {"tenant": tenant_id, "entity": entity_sf},
+                    {"tenant": tenant_id, "entity": entity_sf, "limit": int(settings.max_spans)},
                 )
                 sf = rows_sf.fetchall()
                 evid = [
@@ -857,7 +857,7 @@ async def query(
                     }
                 if evid:
                     import json as _json
-                    prompt = _json.dumps({"question": q, "spans": evid[:2]}, ensure_ascii=False)
+                    prompt = _json.dumps({"question": q, "spans": evid[: settings.max_spans]}, ensure_ascii=False)
                     try:
                         print({
                             "event": "slotfill_synth_request",
@@ -865,7 +865,7 @@ async def query(
                             "entity": entity_sf,
                             "evidence": [
                                 {"text": (e.get("text") or "")[:160], "doc_file_id": e.get("doc_file_id"), "chunk_id": e.get("chunk_id")}
-                                for e in evid[:2]
+                                for e in evid[: settings.max_spans]
                             ],
                         })
                     except Exception:
@@ -874,7 +874,7 @@ async def query(
                     raw = await generate_answer(
                         SYSTEM_PROMPT,
                         prompt,
-                        citations_hint=[{"doc_file_id": e["doc_file_id"], "chunk_id": e["chunk_id"]} for e in evid[:2]],
+                        citations_hint=[{"doc_file_id": e["doc_file_id"], "chunk_id": e["chunk_id"]} for e in evid[: settings.max_spans]],
                         max_tokens_override=36,
                         temperature_override=0.0,
                     )
@@ -1001,7 +1001,7 @@ async def query(
             # Build compact evidence: top spans with inline tags for verification
             spans_payload = []
             used_citations = []
-            for (d, c, s) in top_spans[:6]:
+            for (d, c, s) in top_spans[: settings.max_spans]:
                 tag = f"[D{len(spans_payload)+1}:S1]"
                 spans_payload.append(f"{tag} \"{_truncate(s, 240)}\"")
                 used_citations.append({"doc_file_id": d, "chunk_id": c})
@@ -1186,7 +1186,7 @@ async def query(
             "question": q,
             "spans": [
                 {"text": s, "doc_file_id": d, "chunk_id": c}
-                for (d, c, s) in top_spans[:3]
+                for (d, c, s) in top_spans[: settings.max_spans]
             ],
         }
         user_prompt = _json.dumps(prompt_obj, ensure_ascii=False)
