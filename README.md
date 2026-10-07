@@ -24,30 +24,11 @@ because the engineering is still worth reading.
 
 ## How a query is answered
 
-```mermaid
-flowchart LR
-    Q(["Query"])
-
-    subgraph PG["Postgres — FORCE ROW LEVEL SECURITY"]
-        direction TB
-        B["BM25 lane<br/>weighted tsvector"]
-        V["Vector lane<br/>pgvector cosine"]
-        P["Phrase lane<br/>exact phrase"]
-    end
-
-    Q --> B
-    Q --> V
-    Q --> P
-
-    B -- "rank" --> F{{"RRF fuse<br/>sum of 1/(k + rank)"}}
-    V -- "rank" --> F
-    P -- "bonus" --> F
-
-    F -- "top candidates" --> R["Cross-encoder rerank"]
-    R -- "ordered chunks" --> C["Context packer"]
-    C --> L["LLM"]
-    L -- "answer + chunk ids" --> A(["Cited answer"])
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/pipeline-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/pipeline-light.png">
+  <img src="assets/pipeline-light.png" alt="Query fans out to three retrieval lanes inside the Postgres row-level-security boundary, fuses by RRF, reranks, then generates a cited answer">
+</picture>
 
 Every lane reads through row-level security, so the tenant boundary is crossed once, in the
 database, rather than re-checked in each route.
